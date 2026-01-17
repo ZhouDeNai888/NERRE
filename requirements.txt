@@ -1,0 +1,31 @@
+# --index-url https://download.pytorch.org/whl/cu121
+# --extra-index-url https://pypi.org/simple
+
+# torch==2.5.1
+# torchvision==0.20.1
+# torchaudio==2.5.1
+# pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+
+# --- Hugging Face & NLP Ecosystem ---
+transformers
+accelerate
+datasets==2.19.0
+tokenizers
+safetensors
+huggingface_hub[hf_xet]
+
+
+# --- Data Science & Utilities ---
+tqdm
+scikit-learn
+numpy
+pandas
+
+
+
+
+# --- A100 Performance Optimization ---
+# หมายเหตุ: Flash Attention อาจต้องติดตั้งแยกหาก Compile ไม่ผ่าน
+# flash-attn>=2.0.0
+
+# pip install flash-attn --no-build-isolation
