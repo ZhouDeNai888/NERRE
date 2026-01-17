@@ -192,7 +192,7 @@ def generate_merged_dataset(output_file="train_data.json"):
     all_data.extend(process_cross_re("DFKI-SLT/cross_re", split="train"))
     
     # 2. Load FewRel
-    all_data.extend(process_few_rel("thunlp/few_rel", split="train_wiki"))
+    # all_data.extend(process_few_rel("thunlp/few_rel", split="train_wiki"))
     
     # 3. Load TACRED (ถ้ามี)
     # all_data.extend(process_tacred())
@@ -206,4 +206,4 @@ def generate_merged_dataset(output_file="train_data.json"):
 
 if __name__ == "__main__":
     # รันไฟล์นี้ตรงๆ เพื่อสร้างไฟล์ JSON
-    generate_merged_dataset(output_file="dataset/data.json")
+    generate_merged_dataset(output_file="dataset/data_v2.json")

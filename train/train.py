@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 # 1. หา path ของโฟลเดอร์แม่ (NERRE)
 # (__file__ คือไฟล์ปัจจุบัน -> dirname ครั้งที่ 1 ได้ 'train/' -> dirname ครั้งที่ 2 ได้ 'NERRE/')
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -8,6 +9,7 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(parent_dir)
 
 import torch
+import torch.nn as nn
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast 
 from transformers import AutoTokenizer
@@ -19,18 +21,16 @@ from model.loss_fn.focal_loss import SigmoidFocalLoss
 from model.model import ZeroShotJointModel 
 import train_config as config
 
-# นำเข้า Dataset ที่คุณสร้างไว้
-from data.ZeroShotDataset import ZeroShotDataset, collate_fn
+# นำเข้า Dataset - ใช้ GraphRAGDataset สำหรับ Graph RAG
+from data.GraphRAGDataset import GraphRAGDataset, graph_rag_collate_fn
 
-
-from data.hf_dataloader import generate_merged_dataset # import ฟังก์ชันที่เราเขียนเมื่อกี้
-
-# เช็คว่ามีไฟล์ train_data.json หรือยัง
+# ตรวจสอบว่ามีไฟล์ training data หรือไม่
 if not os.path.exists(config.TRAIN_FILE):
-    print("📢 Train file not found. Generating from Hugging Face datasets...")
-    generate_merged_dataset(output_file=config.TRAIN_FILE)
+    print(f"❌ Train file not found: {config.TRAIN_FILE}")
+    print("   Please create a training dataset first.")
+    sys.exit(1)
 else:
-    print(f"✅ Found existing train file: {config.TRAIN_FILE}")
+    print(f"✅ Found training file: {config.TRAIN_FILE}")
 
 
 
@@ -106,34 +106,39 @@ if __name__ == "__main__":
     # Main Training Script
     # ==========================================
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda:2" if torch.cuda.is_available() else "cpu"
     print(f"Training on: {device}")
 
     # 1. Setup Data & Model
     tokenizer = AutoTokenizer.from_pretrained(config.MODEL_NAME)
 
-    # สร้าง Dataset ของจริง
-    train_dataset = ZeroShotDataset(
-        json_file=config.TRAIN_FILE, # แก้เป็น path json ของคุณ
+    # สร้าง Dataset สำหรับ Graph RAG
+    train_dataset = GraphRAGDataset(
+        json_file=config.TRAIN_FILE,
         tokenizer=tokenizer,
-        max_len=512,
-        neg_sample_ratio=0.5
+        max_len=256,
+        neg_sample_ratio=0.0, # ไม่ต้องใช้ negative label sampling เพราะมี labels ครบแล้ว
+        neg_span_ratio=2.0    # ✅ เพิ่มเป็น 2.0 - 2x negative spans ต่อ positive spans
     )
 
-    # สร้าง DataLoader (สำคัญ: ต้องใส่ collate_fn)
+    # สร้าง DataLoader
     train_dataloader = DataLoader(
         train_dataset, 
         batch_size=config.BATCH_SIZE, 
         shuffle=True, 
-        collate_fn=collate_fn, # <--- เรียกใช้จาก Class หรือไฟล์ที่ import มา
-        num_workers=4,         # ช่วยโหลดข้อมูลเร็วขึ้น
+        collate_fn=graph_rag_collate_fn,
+        num_workers=0,  # ลดเพื่อ debug
         pin_memory=True
     )
 
     model = ZeroShotJointModel(config.MODEL_NAME).to(device)
 
     # 2. Setup Optimizer & Loss
-    criterion = SigmoidFocalLoss(alpha=config.ALPHA, gamma=config.GAMMA, reduction='none') # ใช้ 'none' เพื่อจัดการ Padding เอง
+    # ✅ เปลี่ยนเป็น CrossEntropyLoss สำหรับ single-label classification
+    # CrossEntropy ใช้ softmax + log likelihood ทำให้ model เรียนรู้ที่จะ discriminate ระหว่าง classes
+    # ✅ เพิ่ม label_smoothing=0.1 เพื่อป้องกัน overconfidence (scores ไม่ไปถึง 1.0 หมด)
+    ent_criterion = nn.CrossEntropyLoss(reduction='mean', label_smoothing=0.1)  # For entity type classification
+    rel_criterion = SigmoidFocalLoss(alpha=config.ALPHA, gamma=config.GAMMA, reduction='none')  # Relations can be multi-label
     optimizer = optim.AdamW(model.parameters(), lr=config.LR, weight_decay=config.WEIGHT_DECAY)
     scaler = torch.amp.GradScaler('cuda')
 
@@ -178,11 +183,12 @@ if __name__ == "__main__":
                 
                 loss_ent = 0
                 loss_rel = 0
-                valid_samples = 0
+                valid_ent_samples = 0
+                valid_rel_samples = 0
                 
                 # วนลูปทีละ Sample ใน Batch
                 for b in range(len(batch['spans'])):
-                    # Entity Loss
+                    # Entity Loss (CrossEntropy - single label per span)
                     # Logit: [Num_Spans, Max_Labels] -> ตัดเอาแค่ Num_Labels จริง
                     if len(batch['spans'][b]) > 0: # ถ้ามี Span
                         num_real_labels = ent_targets[b].shape[1] # จำนวน Label จริง (ก่อน Pad)
@@ -191,21 +197,36 @@ if __name__ == "__main__":
                         curr_ent_logits = ent_logits[b, :len(batch['spans'][b]), :num_real_labels]
                         curr_ent_targets = ent_targets[b][:, :num_real_labels]
                         
-                        l_ent = criterion(curr_ent_logits, curr_ent_targets)
-                        loss_ent += l_ent.mean()
-                        valid_samples += 1
+                        # ✅ Convert one-hot to class indices for CrossEntropyLoss
+                        # Shape: [Num_Spans, Num_Labels] -> [Num_Spans] (class indices)
+                        target_indices = curr_ent_targets.argmax(dim=1).long()  # Get the class index for each span
+                        
+                        l_ent = ent_criterion(curr_ent_logits, target_indices)
+                        loss_ent += l_ent
+                        valid_ent_samples += 1
                     
-                    # Relation Loss (ถ้ามี)
+                    # Relation Loss (Focal Loss - can be multi-label)
                     if rel_logits is not None and len(batch['pairs'][b]) > 0:
-                        # (Logic เดียวกัน)
-                        l_rel = criterion(rel_logits[b, :len(batch['pairs'][b]), :], rel_targets[b])
+                        l_rel = rel_criterion(rel_logits[b, :len(batch['pairs'][b]), :], rel_targets[b])
                         loss_rel += l_rel.mean()
+                        valid_rel_samples += 1
 
                 # Average Loss
-                if valid_samples > 0:
-                    loss = (loss_ent + loss_rel) / valid_samples
+                total_samples = max(1, valid_ent_samples + valid_rel_samples)
+                if valid_ent_samples > 0:
+                    loss_ent = loss_ent / valid_ent_samples
                 else:
-                    loss = torch.tensor(0.0, requires_grad=True).to(device)
+                    loss_ent = torch.tensor(0.0, device=device)
+                if valid_rel_samples > 0:
+                    loss_rel = loss_rel / valid_rel_samples
+                else:
+                    loss_rel = torch.tensor(0.0, device=device)
+                    
+                loss = loss_ent + loss_rel
+                
+                # Handle case where both are zero (no valid samples at all)
+                if valid_ent_samples == 0 and valid_rel_samples == 0:
+                    loss = torch.tensor(0.0, requires_grad=True, device=device)
 
             # Backward
             scaler.scale(loss).backward()
@@ -229,5 +250,14 @@ if __name__ == "__main__":
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     torch.save(model.state_dict(), f"{config.OUTPUT_DIR}/pytorch_model.bin")
     tokenizer.save_pretrained(config.OUTPUT_DIR)
-    # ... Save Config ...
+    
+    # Save Config - ✅ ใช้ all_ent_labels_with_O ที่รวม "O" label
+    with open(f"{config.OUTPUT_DIR}/config.json", "w", encoding='utf-8') as f:
+        json.dump({
+            "model_name": config.MODEL_NAME,
+            "ent_labels": train_dataset.all_ent_labels_with_O,  # ✅ รวม "O"
+            "rel_labels": sorted(list(train_dataset.all_rel_labels))
+        }, f, ensure_ascii=False, indent=4)
+        
     print(f"Model saved to {config.OUTPUT_DIR}")
+    print(f"✅ Entity labels (with O): {train_dataset.all_ent_labels_with_O}")

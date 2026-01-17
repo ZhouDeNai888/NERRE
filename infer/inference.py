@@ -45,10 +45,46 @@ class NERREInference:
         ent_inputs = tokenize_list(ent_labels)
         rel_inputs = tokenize_list(rel_labels)
         
+        # Add batch dimension [1, Num_Labels, Seq_Len] to match model expectation
         self.model.set_global_labels(
-            ent_inputs["input_ids"], ent_inputs["attention_mask"],
-            rel_inputs["input_ids"], rel_inputs["attention_mask"]
+            ent_inputs["input_ids"].unsqueeze(0), ent_inputs["attention_mask"].unsqueeze(0),
+            rel_inputs["input_ids"].unsqueeze(0), rel_inputs["attention_mask"].unsqueeze(0)
         )
+
+    def _nms(self, entities):
+        """Non-Maximum Suppression to remove overlapping entities"""
+        if not entities: return []
+        
+        # Sort by score descending (high confidence first)
+        sorted_ents = sorted(entities, key=lambda x: x['score'], reverse=True)
+        keep = []
+        
+        while sorted_ents:
+            # Pick the best entity
+            current = sorted_ents.pop(0)
+            keep.append(current)
+            
+            # Remove entities that overlap with 'current'
+            c_start, c_end = current['span_char']
+            
+            non_overlapping = []
+            for ent in sorted_ents:
+                e_start, e_end = ent['span_char']
+                
+                # Check overlap: (StartA < EndB) and (EndA > StartB)
+                # Note: span_char is usually inclusive or slightly distinct depending on implementation
+                # but standard intersection logic is: max(s1, s2) < min(e1, e2)
+                # In python slice terms: text[s:e], so s is inclusive, e is exclusive.
+                # Here we used text[char_start:char_end] so it is [s, e).
+                
+                if max(c_start, e_start) < min(c_end, e_end):
+                    continue # Discard overlapping entity
+                
+                non_overlapping.append(ent)
+            
+            sorted_ents = non_overlapping
+            
+        return sorted(keep, key=lambda x: x['span_char'][0])
 
     def predict(self, text, threshold=0.5, max_span_width=8):
         # 1. Tokenize Text
@@ -114,8 +150,8 @@ class NERREInference:
                 }
                 found_entities.append(ent_obj)
         
-        # Optional: Apply NMS (Non-Maximum Suppression) เพื่อลบ span ที่ซ้อนทับกัน
-        # (ขอข้ามขั้นตอนนี้ไปก่อน เพื่อความง่าย)
+        # Apply NMS (Non-Maximum Suppression)
+        found_entities = self._nms(found_entities)
 
         # 5. Model Inference (Relations)
         # สร้าง Pairs จาก Entities ที่หาเจอเท่านั้น
@@ -183,6 +219,13 @@ if __name__ == "__main__":
     inference = NERREInference("saved_model_v1")
     
     text = "Elon Musk founded SpaceX in 2002."
-    result = inference.predict(text)
+    result = inference.predict(text, threshold=0.5)
     
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    print("\n--- Formatted Predictions ---")
+    print("Entities:")
+    for ent in result["entities"]:
+        print(f"  - {ent['text']} : {ent['label']}") # (Score: {ent['score']:.4f})
+        
+    print("\nRelations:")
+    for rel in result["relations"]:
+        print(f"  - {rel['subject']} --[{rel['relation']}]--> {rel['object']}") # (Score: {rel['score']:.4f})
