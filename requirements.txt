@@ -29,3 +29,6 @@ pandas
 # flash-attn>=2.0.0
 
 # pip install flash-attn --no-build-isolation
+
+
+# nohup /home/tcustpg18/data/miniconda/envs/NERRE/bin/python /data/tcustpg18/NERRE/NERRE/train/train.py

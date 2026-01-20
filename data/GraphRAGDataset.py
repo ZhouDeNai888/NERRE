@@ -56,6 +56,8 @@ class GraphRAGDataset(Dataset):
         
         # ✅ เพิ่ม "O" label ไว้ตัวแรก (index 0)
         self.all_ent_labels_with_O = [self.O_LABEL] + self.all_ent_labels
+
+        self.ent_label2id = {label: i for i, label in enumerate(self.all_ent_labels_with_O)}
         
         print(f"✅ Found {len(self.all_ent_labels)} entity types: {self.all_ent_labels}")
         print(f"✅ Added 'O' label for non-entity spans")
@@ -119,40 +121,65 @@ class GraphRAGDataset(Dataset):
             })
         return words
 
-    def _generate_negative_spans(self, words, valid_entity_char_ranges, num_to_sample, max_span_width=3):
-        """สร้าง negative spans (ที่ไม่ใช่ entity) สำหรับ training"""
-        negative_spans = []
+    def _generate_negative_spans(self, words, valid_entities, num_to_sample, max_span_width=3):
+        """
+        สร้าง negative spans โดยเน้น "Hard Negatives" (ส่วนย่อยของ Entity จริง)
+        เพื่อให้โมเดลเรียนรู้ที่จะไม่ตอบคำที่ซ้อนทับกัน
+        """
+        all_candidates = []
         n_words = len(words)
         
-        all_candidates = []
+        # -------------------------------------------------------------
+        # 🔥 กลยุทธ์ที่ 1: Hard Negatives (Sub-spans) - พระเอกของเรา
+        # ตัด Entity จริงให้แหว่งๆ แล้วบอกว่าเป็น Negative
+        # -------------------------------------------------------------
+        valid_entity_ranges = set() # เก็บช่วงที่เป็น Entity จริงไว้เช็ค
+        
+        for ent in valid_entities:
+            # ent คือ dict ที่มี 'span': (start, end)
+            start, end = ent['span'] # token index
+            valid_entity_ranges.add((start, end))
+            
+            # ถ้า Entity ยาวกว่า 1 token (เช่น "Elon Musk")
+            # ให้สร้าง sub-span (เช่น "Elon", "Musk") แล้วยัดเป็น Negative
+            span_len = end - start + 1
+            if span_len > 1:
+                # Loop สร้าง sub-spans ภายในตัวมันเอง
+                for i in range(span_len):
+                    for j in range(i, span_len):
+                        sub_start = start + i
+                        sub_end = start + j
+                        
+                        # ถ้า sub-span นี้ ไม่ใช่ตัวเต็ม (คือสั้นกว่าตัวเต็ม)
+                        if not (sub_start == start and sub_end == end):
+                            all_candidates.append((sub_start, sub_end))
+
+        # -------------------------------------------------------------
+        # กลยุทธ์ที่ 2: Random Negatives (เหมือนเดิม)
+        # สุ่มจากที่ว่างๆ เพื่อให้รู้จักคำทั่วไป
+        # -------------------------------------------------------------
         for width in range(1, min(max_span_width + 1, n_words + 1)):
             for start_idx in range(n_words - width + 1):
                 end_idx = start_idx + width - 1
-                span_words = words[start_idx:end_idx + 1]
-                char_start = span_words[0]['char_start']
-                char_end = span_words[-1]['char_end']
-                token_start = span_words[0]['token_start']
-                token_end = span_words[-1]['token_end']
                 
-                # Check if overlaps with any entity
-                is_entity = False
-                for ent_start, ent_end in valid_entity_char_ranges:
-                    # Overlap check
-                    if not (char_end <= ent_start or char_start >= ent_end):
-                        is_entity = True
-                        break
-                
-                if not is_entity:
-                    all_candidates.append((token_start, token_end))
+                # ถ้าช่วงนี้ ไม่ใช่ Entity จริง (เช็คจาก set ที่เก็บไว้)
+                if (start_idx, end_idx) not in valid_entity_ranges:
+                     # (Optional) กรองไม่ให้ซ้ำกับ Hard Negatives ที่ใส่ไปแล้วก็ได้ 
+                     # แต่ปล่อยให้ซ้ำก็ได้ ยิ่งเน้นย้ำ
+                    all_candidates.append((start_idx, end_idx))
         
-        # Sample some negatives
+        # สุ่มมาใช้ตามจำนวนที่ต้องการ
         if all_candidates and num_to_sample > 0:
+            # แนะนำให้สุ่มโดยให้โอกาส Hard Negatives เยอะหน่อย 
+            # (แต่ใน list all_candidates ตอนนี้ปนกันอยู่ สุ่มเลยก็ได้)
             negative_spans = random.sample(
                 all_candidates, 
                 k=min(len(all_candidates), num_to_sample)
             )
+            return negative_spans
+            
+        return []
         
-        return negative_spans
 
     def __getitem__(self, idx):
         item = self.data[idx]
@@ -194,7 +221,7 @@ class GraphRAGDataset(Dataset):
         words = self._get_word_boundaries(encoding, text)
         num_neg_spans = max(1, int(len(valid_entities) * self.neg_span_ratio))
         negative_spans = self._generate_negative_spans(
-            words, valid_entity_char_ranges, num_neg_spans
+            words, valid_entities, num_neg_spans
         )
         
         # 4. Combine positive and negative spans
@@ -219,55 +246,147 @@ class GraphRAGDataset(Dataset):
         num_ent_labels = len(train_ent_labels)
         
         ent_targets = torch.zeros((num_spans, num_ent_labels))
-        
-        for i, label in enumerate(all_span_labels):
-            if label in train_ent_labels:
-                label_idx = train_ent_labels.index(label)
+
+        # 🔥 [FIX] เติมค่า 1.0 ให้ตรงกับ Label จริง
+        for i, label_text in enumerate(all_span_labels):
+            # ใช้ .get() เพื่อความปลอดภัยและรวดเร็ว
+            if label_text in self.ent_label2id:
+                label_idx = self.ent_label2id[label_text]
                 ent_targets[i, label_idx] = 1.0
+            else:
+                # กรณีกันพลาด: ถ้าไม่เจอให้โยนลง "O"
+                if self.O_LABEL in self.ent_label2id:
+                    o_idx = self.ent_label2id[self.O_LABEL]
+                    ent_targets[i, o_idx] = 1.0
         
-        # 5. Prepare relation pairs and targets
-        # Map original entity idx -> new idx in valid_entities
-        original_to_valid = {}
+        # ===========================================================
+        # 🔥 [UPDATED FIX] ใช้ Hybrid Mapping (ID เป็นหลัก, Text สำรอง)
+        # ===========================================================
+        
+        # 1. สร้าง Maps เตรียมไว้ 2 แบบ
+        id_to_valid_indices = {}    # ✅ แบบแม่นยำ (ใช้ original_idx จาก JSON)
+        text_to_valid_indices = {}  # ⚠️ แบบสำรอง (ใช้ text)
+
         for new_idx, ent in enumerate(valid_entities):
-            original_to_valid[ent['original_idx']] = new_idx
+            # --- A. Map by ID (Original Index) ---
+            orig_idx = ent['original_idx']
+            if orig_idx not in id_to_valid_indices:
+                id_to_valid_indices[orig_idx] = []
+            id_to_valid_indices[orig_idx].append(new_idx)
+            
+            # --- B. Map by Text (Fallback) ---
+            # ดึง Text ออกมาจาก JSON เดิม
+            orig_ent_data = entities[orig_idx] 
+            # ถ้าใน JSON มี key 'text' ก็ใช้ ถ้าไม่มีก็ตัด string เอา
+            entity_text = orig_ent_data.get('text', text[orig_ent_data['start']:orig_ent_data['end']])
+            
+            if entity_text not in text_to_valid_indices:
+                text_to_valid_indices[entity_text] = []
+            text_to_valid_indices[entity_text].append(new_idx)
         
-        rel_pairs = []
-        rel_targets_list = []
+        # 2. จับคู่ความสัมพันธ์ (Relation Mapping)
+        positive_rel_map = {}
         
         for rel in relations:
-            head_orig = rel['head']
-            tail_orig = rel['tail']
+            head_indices = []
+            tail_indices = []
+
+            # 🔥 Priority 1: เช็คว่า JSON มี 'head_idx' / 'tail_idx' หรือไม่ (แม่นยำที่สุด)
+            if 'head_idx' in rel and 'tail_idx' in rel:
+                head_indices = id_to_valid_indices.get(rel['head_idx'], [])
+                tail_indices = id_to_valid_indices.get(rel['tail_idx'], [])
+
+            # ⚠️ Priority 2: ถ้าไม่มี ID ให้ใช้ชื่อ (Text) เหมือนเดิม
+            elif 'head' in rel and 'tail' in rel:
+                head_indices = text_to_valid_indices.get(rel['head'], [])
+                tail_indices = text_to_valid_indices.get(rel['tail'], [])
             
-            # Check if both entities are valid
-            if head_orig in original_to_valid and tail_orig in original_to_valid:
-                head_new = original_to_valid[head_orig]
-                tail_new = original_to_valid[tail_orig]
-                
-                rel_pairs.append((head_new, tail_new))
-                
-                # Create one-hot for this relation
-                rel_target = torch.zeros(len(self.all_rel_labels))
-                if rel['label'] in self.all_rel_labels:
-                    rel_idx = self.all_rel_labels.index(rel['label'])
-                    rel_target[rel_idx] = 1.0
-                rel_targets_list.append(rel_target)
+            # ถ้าหา Entity ไม่เจอเลย (เช่น ถูกตัดทิ้งตอน Tokenize) ให้ข้าม
+            if not head_indices or not tail_indices:
+                continue
+
+            # เตรียม Target (One-hot vector)
+            rel_target = torch.zeros(len(self.all_rel_labels))
+            if rel['label'] in self.all_rel_labels:
+                rel_idx = self.all_rel_labels.index(rel['label']) # หรือใช้ self.label2id ถ้าทำแล้ว
+                rel_target[rel_idx] = 1.0
+            
+            # จับคู่ทุกความเป็นไปได้ (Pairing)
+            for h_idx in head_indices:
+                for t_idx in tail_indices:
+                    if h_idx == t_idx: continue # ข้าม Self-loop
+                    
+                    pair_key = (h_idx, t_idx)
+                    
+                    # ถ้าคู่นี้มีอยู่แล้ว ให้รวม Logic (OR) เผื่อมีความสัมพันธ์หลายแบบ
+                    if pair_key in positive_rel_map:
+                        positive_rel_map[pair_key] = torch.max(positive_rel_map[pair_key], rel_target)
+                    else:
+                        positive_rel_map[pair_key] = rel_target
+
+        # ... (ต่อด้วยส่วน Negative Sampling โค้ดเดิมได้เลย) ...
+
+        # -----------------------------------------------------------
+        # 🔥 แก้ไขด่วน: ใช้ "Negative Sampling" แทน "All Negatives"
+        # -----------------------------------------------------------
+        all_pairs = []
+        all_targets = []
         
-        # Stack relation targets
-        if rel_targets_list:
-            rel_targets = torch.stack(rel_targets_list)
+        # 1. ใส่ Positive Pairs (ของจริง) ให้ครบก่อน
+        # เรียงลำดับเพื่อให้ Reproducible (สำคัญมาก)
+        pos_keys = sorted(list(positive_rel_map.keys()))
+        for pair in pos_keys:
+            all_pairs.append(pair)
+            all_targets.append(positive_rel_map[pair])
+            
+        num_positives = len(pos_keys)
+        
+        # 2. เก็บ Negative Candidates (คู่ที่ไม่มีความสัมพันธ์)
+        neg_candidates = []
+        num_entities = len(valid_entities)
+        
+        if num_entities > 1:
+            for i in range(num_entities):
+                for j in range(num_entities):
+                    if i == j: continue 
+                    pair = (i, j)
+                    if pair not in positive_rel_map:
+                        neg_candidates.append(pair)
+        
+        # 3. 🔥 สุ่มเลือก Negative มาแค่บางส่วน (Sampling)
+        # กฎ: เอา Negative แค่ 3 เท่าของ Positive ก็พอ (Ratio 1:3)
+        # ถ้าไม่มี Positive เลย ให้สุ่มมาสัก 2-3 ตัว เพื่อสอนว่า "หน้านี้ไม่มีอะไรนะ"
+        
+        if num_positives > 0:
+            num_neg_to_sample = min(len(neg_candidates), num_positives * 3) # ✅ Ratio 1:3
+        else:
+            num_neg_to_sample = min(len(neg_candidates), 5) # ถ้าไม่มี Positive เลย เอามาสอนนิดหน่อย
+            
+        if neg_candidates:
+            # ใช้ random.sample เพื่อกระจายความเสี่ยง
+            selected_negs = random.sample(neg_candidates, num_neg_to_sample)
+            
+            zero_target = torch.zeros(len(self.all_rel_labels))
+            for pair in selected_negs:
+                all_pairs.append(pair)
+                all_targets.append(zero_target)
+
+        # 4. Stack Targets (เหมือนเดิม)
+        if all_targets:
+            rel_targets = torch.stack(all_targets)
         else:
             rel_targets = torch.zeros((0, len(self.all_rel_labels)))
         
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "spans": all_spans,  # ✅ ใช้ all_spans ที่รวม positive + negative
+            "spans": all_spans,
             "ent_labels": train_ent_labels,
             "ent_targets": ent_targets,
-            "rel_pairs": rel_pairs,
+            "rel_pairs": all_pairs,      # ✅ ส่งไปทั้งคู่จริงและคู่หลอก
             "rel_labels": self.all_rel_labels,
-            "rel_targets": rel_targets,
-            "num_positive_spans": len(valid_entities)  # บอกว่า span แรก N ตัวเป็น entity จริง
+            "rel_targets": rel_targets,  # ✅ Target มีทั้ง 1 และ 0
+            "num_positive_spans": len(valid_entities)
         }
 
 

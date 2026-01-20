@@ -84,5 +84,9 @@ tmp/
 
 
 # User specific ignores
-saved_model_v10/
+saved_model_v11/
+saved_model_v13/
+saved_model_v15/
+saved_model_v16/
+
 huggingface_release/

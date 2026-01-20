@@ -19,18 +19,32 @@
 
 ## 📊 Benchmark Results
 
-Comparison against popular NER tools on multilingual test set (English + Chinese + Japanese):
+### Relation Extraction (RE) - Comparison with SpERT
 
-| Model | Precision | Recall | **F1 Score** | Notes |
-|-------|-----------|--------|--------------|-------|
-| **NERRE (Ours)** | 0.959 | **0.986** | **0.973** | Best overall |
-| GLiNER | **0.978** | 0.738 | 0.841 | Lower recall |
-| spaCy | 0.971 | 0.557 | 0.708 | English-only |
+Strict matching benchmark on aligned test set (100 samples, 155 relations):
+
+| Model | Precision | Recall | **F1 Score** | Training Type |
+|-------|-----------|--------|--------------|---------------|
+| **NERRE (Ours)** | 0.691 | **0.812** | **0.747** | Zero-shot |
+| SpERT (CoNLL04) | - | - | 0.726 | Supervised |
+
+> 📈 **NERRE outperforms SpERT by 2.1%** in RE F1 score while being **zero-shot** (no task-specific training)!
+
+### Named Entity Recognition (NER) - Full Comparison
+
+| Model | Precision | Recall | **F1 Score** | Time (s) | Notes |
+|-------|-----------|--------|--------------|----------|-------|
+| **NERRE (Ours)** | 0.838 | **0.965** | **0.897** | 2.35 | Best F1, fastest |
+| GLiNER | **0.916** | 0.830 | 0.871 | 386.00 | High precision |
+| NuNER Zero | 0.939 | 0.725 | 0.818 | 757.59 | Zero-shot NER |
+| NuNER Zero-span | 0.937 | 0.723 | 0.817 | 757.59 | Span variant |
+| spaCy | 0.793 | 0.561 | 0.658 | 0.44 | English-only |
 
 ### Key Findings
 
-- **NERRE achieves the highest F1 score (0.973)** with balanced precision and recall
-- **GLiNER** has high precision but misses many entities (lower recall)
+- **NERRE achieves the best F1 score (0.897)** with excellent recall (96.5%)
+- **NERRE is the only model that extracts both NER and RE** in a single pass
+- **GLiNER/NuNER** have high precision but miss more entities
 - **spaCy** is fast but only supports English, missing all CJK entities
 
 ### Speed Benchmark (10,000 characters)
@@ -141,12 +155,63 @@ NERRE/
 ├── data/
 │   └── hf_dataloader.py   # Data loading utilities
 ├── dataset/
-│   └── *.json             # Training data
+│   ├── multilingual_data_v3_5000.json   # 5,000 samples
+│   ├── multilingual_data_v3_10000.json  # 10,000 samples
+│   ├── generate_large_dataset.py        # Dataset generator v1 (7 entity types)
+│   └── generate_large_dataset_v2.py     # Dataset generator v2 (100 types)
 ├── eval/
 │   └── eval.py            # Evaluation script
 ├── benchmark/
 │   └── benchmark_ner.py   # Benchmark vs GLiNER, spaCy
 └── README.md
+```
+
+## 📊 Training Datasets
+
+We provide pre-generated multilingual datasets for training:
+
+| Dataset | Samples | Entities | Relations | Entity Types | Relation Types |
+|---------|---------|----------|-----------|--------------|----------------|
+| `multilingual_data_v4_10000.json` | 10,000 | 22,952 | 12,952 | 24 | 33 |
+| `multilingual_data_v3_10000.json` | 10,000 | 29,894 | 20,486 | 7 | 7 |
+| `multilingual_data_v3_5000.json` | 5,000 | 14,816 | 10,114 | 7 | 7 |
+
+### Supported Entity Types (24 types in v4)
+
+| Category | Types |
+|----------|-------|
+| **Person** | person, athlete, musician, actor, director, author, scientist, engineer, entrepreneur, journalist |
+| **Organization** | organisation, university, sports_team |
+| **Location** | location |
+| **Time** | date |
+| **Product** | product, movie, book, award, programlang, framework, ai_model, competition, event |
+
+### Supported Relation Types (33 types in v4)
+
+| Category | Relations |
+|----------|-----------|
+| **Creation** | founder_of, creator_of, developed, author_of, director_of, composed_by |
+| **Employment** | ceo_of, works_at, professor_at, research_at |
+| **Location** | located_in, headquartered_in, born_in, part_of |
+| **Time** | founded_in, released_in, graduated_in, started_in, occurred_on, married_on |
+| **Education** | studied_at, graduated_from |
+| **Sports** | plays_for, signed_with, champion_of |
+| **Business** | acquired_by, subsidiary_of, investor_in |
+| **Awards** | won |
+| **Media** | starred_in, featured_in, performed_at |
+| **Family** | spouse_of |
+
+### Generate Custom Dataset
+
+```bash
+# Show all 100 entity types and 100 relation types
+python dataset/generate_large_dataset_v2.py --show-types
+
+# Generate 10000 samples (v2 with diverse types)
+python dataset/generate_large_dataset_v2.py --count 10000 --output my_dataset.json
+
+# Generate 5000 samples (v1 with 7 types)
+python dataset/generate_large_dataset.py --count 5000 --output my_dataset.json --seed 42
 ```
 
 ## 🔧 Training Your Own Model

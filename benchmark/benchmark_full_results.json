@@ -1,0 +1,101 @@
+{
+  "NERRE": {
+    "entity_f1": 0.9290322580645162,
+    "entity_precision": 0.9113924050632911,
+    "entity_recall": 0.9473684210526315,
+    "relation_f1": 0.425531914893617,
+    "time": 0.6224133968353271,
+    "supports_re": true
+  },
+  "NERRE (Fast)": {
+    "entity_f1": 0.9240506329113924,
+    "entity_precision": 0.9012345679012346,
+    "entity_recall": 0.948051948051948,
+    "relation_f1": null,
+    "time": 0.3674280643463135,
+    "supports_re": false
+  },
+  "NuNER Zero": {
+    "entity_f1": 0.8833333333333333,
+    "entity_precision": 1.0,
+    "entity_recall": 0.7910447761194029,
+    "relation_f1": null,
+    "time": 178.49285697937012,
+    "supports_re": false
+  },
+  "NuNER Zero-span": {
+    "entity_f1": 0.9291338582677166,
+    "entity_precision": 0.9833333333333333,
+    "entity_recall": 0.8805970149253731,
+    "relation_f1": null,
+    "time": 177.7600281238556,
+    "supports_re": false
+  },
+  "GLiNER": {
+    "entity_f1": 0.896,
+    "entity_precision": 0.9655172413793104,
+    "entity_recall": 0.835820895522388,
+    "relation_f1": null,
+    "time": 77.16559052467346,
+    "supports_re": false
+  },
+  "spaCy": {
+    "entity_f1": 0.7610619469026548,
+    "entity_precision": 0.9347826086956522,
+    "entity_recall": 0.6417910447761194,
+    "relation_f1": null,
+    "time": 0.10000991821289062,
+    "supports_re": false
+  },
+  "SpERT (Reference)": {
+    "model": "SpERT",
+    "paper": "Eberts & Ulges, ECAI 2020",
+    "datasets": {
+      "CoNLL04": {
+        "entity_f1": 0.8821,
+        "relation_f1": 0.7261
+      },
+      "SciERC": {
+        "entity_f1": 0.7087,
+        "relation_f1": 0.4803
+      },
+      "ADE": {
+        "entity_f1": 0.8942,
+        "relation_f1": 0.7917
+      }
+    },
+    "note": "Reference results from paper. SpERT is archived (April 2025)."
+  },
+  "speed_benchmark": {
+    "NERRE": {
+      "time": 6.270445823669434,
+      "entities": 687,
+      "relations": 21,
+      "chars_per_sec": 1594.782935888289
+    },
+    "NERRE (Fast)": {
+      "time": 0.8711178302764893,
+      "entities": 684,
+      "relations": 0,
+      "chars_per_sec": 11479.503291565092
+    },
+    "NuNER Zero": {
+      "time": 17.336507558822632,
+      "entities": 181,
+      "relations": 0,
+      "chars_per_sec": 576.8174452709163
+    },
+    "GLiNER": {
+      "time": 9.106107234954834,
+      "entities": 92,
+      "relations": 0,
+      "chars_per_sec": 1098.1640938307708
+    },
+    "spaCy": {
+      "time": 0.17630648612976074,
+      "entities": 569,
+      "relations": 0,
+      "chars_per_sec": 56719.41072343786
+    }
+  }
+}

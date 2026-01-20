@@ -3,78 +3,162 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
 from torch.nn.utils.rnn import pad_sequence
+
+
+class MLPProjector(nn.Module):
+    def __init__(self, input_dim, output_dim, dropout=0.1):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(input_dim, input_dim),
+            nn.LayerNorm(input_dim), # เพิ่ม LayerNorm
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(input_dim, output_dim),
+            nn.LayerNorm(output_dim) # เพิ่ม LayerNorm
+        )
+    
+    def forward(self, x):
+        return self.layers(x)
+
+
+class AttentionPooling(nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.GELU(),
+            nn.Linear(hidden_size // 2, 1)
+        )
+
+    def forward(self, hidden_states, mask):
+        # hidden_states: [Batch, Seq, Hidden]
+        attn_logits = self.attention(hidden_states).squeeze(-1) # [Batch, Seq]
+        # attn_logits = attn_logits.masked_fill(mask == 0, -1e9)
+        attn_logits = attn_logits.masked_fill(mask == 0, float('-inf'))
+        attn_weights = F.softmax(attn_logits, dim=-1).unsqueeze(-1) # [Batch, Seq, 1]
+        
+        pooled_output = torch.sum(hidden_states * attn_weights, dim=1)
+        return pooled_output
+
 class ZeroShotJointModel(nn.Module):
-    def __init__(self, model_name, hidden_size=768):
+    def __init__(self, model_name="xlm-roberta-base", hidden_size=768, dropout=0.1, use_mean_pooling=True):
         super(ZeroShotJointModel, self).__init__()
         
-        # 1. Shared Encoder (ใช้ตัวเดียวกันทั้ง Text และ Labels เพื่อประหยัดเมม A100)
-        # แนะนำ: 'xlm-roberta-large' หรือ 'microsoft/deberta-v3-large' สำหรับ A100
+        # 1. Shared Encoder
         self.encoder = AutoModel.from_pretrained(model_name)
         
-        # 2. Projection Layers
-        # ปรับขนาด Vector ของ Entity Span ให้เหมาะกับการเทียบกับ Label
-        self.entity_proj = nn.Linear(hidden_size, hidden_size)
+        # 2. Projection Heads (MLP instead of single Linear for better zero-shot)
+        self.entity_proj = MLPProjector(hidden_size * 3, hidden_size, dropout)
+        self.relation_proj = MLPProjector(hidden_size * 4, hidden_size, dropout)
         
-        # ปรับขนาด Vector ของ Relation (Subj + Obj) ให้เหลือเท่ากับ Label Vector
-        # Input size * 2 เพราะเราเอา Subject กับ Object มาต่อกัน
-        self.relation_proj = nn.Linear(hidden_size * 2, hidden_size)
+        # 3. Label Projection (separate from span projection)
+        self.label_proj = MLPProjector(hidden_size, hidden_size, dropout)
         
         self.hidden_size = hidden_size
+        self.use_mean_pooling = use_mean_pooling  # Better for descriptions
+        self.dropout = nn.Dropout(dropout)
         
-        # เก็บ Embeddings ของ Labels ไว้ใช้ตอน Inference (ไม่ต้องคำนวณใหม่ทุกครั้ง)
+        # Learnable temperature for scaling (optional)
+        self.log_temperature = nn.Parameter(torch.log(torch.tensor(0.07)))
+        
+        # Cache
         self.cached_ent_embeds = None
         self.cached_rel_embeds = None
 
+        self.attn_pool = AttentionPooling(hidden_size)
+
+    @property
+    def temperature(self):
+        """Clamp temperature to reasonable range"""
+        return torch.clamp(self.log_temperature.exp(), min=0.01, max=1.0)
+
     def set_global_labels(self, ent_label_ids, ent_label_mask, rel_label_ids, rel_label_mask):
-        """เรียกใช้ครั้งเดียวตอน Inference เพื่อจำ Labels ไว้"""
+        """Cache labels for inference"""
         with torch.no_grad():
             self.cached_ent_embeds = self.encode_labels(ent_label_ids, ent_label_mask)
             self.cached_rel_embeds = self.encode_labels(rel_label_ids, rel_label_mask)
         print("✅ Labels cached for inference!")
 
-    def _get_span_embeddings(self, sequence_output, starts, ends):
-        """ดึง Vector ของช่วงคำ (Span) จากประโยค"""
-        device = sequence_output.device
-        
-        span_embeddings = []
-        for i in range(len(starts)): # Loop per batch sample
-            # ถ้า Sample นี้ไม่มี Entity เลย ให้ใส่ Tensor ว่างๆ
-            if len(starts[i]) == 0:
-                # สร้าง empty tensor [0, Hidden]
-                span_embeddings.append(torch.zeros(0, self.hidden_size).to(device))
-                continue
+    def _mean_pooling(self, hidden_states, attention_mask):
+        """Mean pooling - better than CLS for semantic understanding"""
+        # hidden_states: [Batch, Seq, Hidden]
+        # attention_mask: [Batch, Seq]
+        mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
+        sum_embeddings = torch.sum(hidden_states * mask_expanded, dim=1)
+        sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
+        return sum_embeddings / sum_mask
 
-            # ดึง Vector หัวคำ (Start) และ ท้ายคำ (End)
-            # ใช้ Fancy Indexing ดึงทีเดียวทั้งประโยค (เร็วกว่า loop)
-            # starts[i] เป็น List เช่น [1, 5] -> tensor([1, 5])
-            s_indices = torch.tensor(starts[i], device=device)
-            e_indices = torch.tensor(ends[i], device=device)
+    # def _get_span_embeddings(self, sequence_output, starts, ends):
+    #     """ดึง Vector ของช่วงคำ (Span) จากประโยค"""
+    #     device = sequence_output.device
+        
+    #     span_embeddings = []
+    #     for i in range(len(starts)):
+    #         if len(starts[i]) == 0:
+    #             span_embeddings.append(torch.zeros(0, self.hidden_size).to(device))
+    #             continue
+
+    #         s_indices = torch.tensor(starts[i], device=device)
+    #         e_indices = torch.tensor(ends[i], device=device)
             
-            s_vec = sequence_output[i, s_indices, :] # [Num_Spans, Hidden]
-            e_vec = sequence_output[i, e_indices, :]
+    #         s_vec = sequence_output[i, s_indices, :]
+    #         e_vec = sequence_output[i, e_indices, :]
             
-            # Mean Pooling: (Start + End) / 2
-            span_embeddings.append((s_vec + e_vec) / 2)
+    #         # Mean Pooling: (Start + End) / 2
+    #         span_embeddings.append(torch.cat([s_vec, e_vec], dim=-1))
             
-        # [FIX] ใช้ pad_sequence แทน stack
-        # batch_first=True จะได้ shape: [Batch, Max_Num_Spans, Hidden]
+    #     return pad_sequence(span_embeddings, batch_first=True, padding_value=0.0)
+
+
+
+    def _get_span_embeddings(self, sequence_output, starts, ends):
+        device = sequence_output.device
+        span_embeddings = []
+        
+        for i in range(len(starts)):
+            batch_vecs = []
+            for s, e in zip(starts[i], ends[i]):
+                s_vec = sequence_output[i, s, :]
+                e_vec = sequence_output[i, e, :]
+                
+                # Max Pooling ภายใน Span (Internal Context)
+                internal_vec = sequence_output[i, s:e+1, :].max(dim=0)[0]
+                
+                # รวมพลัง: Start + End + Max 
+                # ขนาดจะกลายเป็น hidden_size * 3
+                combined_vec = torch.cat([s_vec, e_vec, internal_vec], dim=-1)
+                batch_vecs.append(combined_vec)
+                
+            if len(batch_vecs) == 0:
+                span_embeddings.append(torch.zeros(0, self.hidden_size * 3).to(device))
+            else:
+                span_embeddings.append(torch.stack(batch_vecs))
+                
         return pad_sequence(span_embeddings, batch_first=True, padding_value=0.0)
 
     def encode_labels(self, label_input_ids, label_attention_mask):
-        # Input shape: [Batch, Num_Labels, Seq_Len]
+        """Encode labels using mean pooling for better semantic understanding"""
         batch_size, num_labels, seq_len = label_input_ids.shape
         
-        # 1. Flatten: รวม Batch กับ Num_Labels เข้าด้วยกัน
-        # เป็น [Batch * Num_Labels, Seq_Len]
         flat_input_ids = label_input_ids.view(-1, seq_len)
         flat_mask = label_attention_mask.view(-1, seq_len)
         
-        # 2. Pass through Encoder
         outputs = self.encoder(input_ids=flat_input_ids, attention_mask=flat_mask)
-        embeddings = outputs.last_hidden_state[:, 0, :] # [Batch * Num_Labels, Hidden]
         
-        # 3. Reshape กลับมาเป็น 3 มิติ
-        # [Batch, Num_Labels, Hidden]
+        if self.use_mean_pooling:
+            # Mean pooling - better for understanding descriptions
+            # embeddings = self._mean_pooling(outputs.last_hidden_state, flat_mask)
+            embeddings = self.attn_pool(outputs.last_hidden_state, flat_mask)
+        else:
+            # CLS token
+            embeddings = outputs.last_hidden_state[:, 0, :]
+        
+        # Project labels through label projection head
+        embeddings = self.label_proj(embeddings)
+        
+        # L2 normalize for cosine similarity
+        embeddings = F.normalize(embeddings, p=2, dim=-1)
+        
         return embeddings.view(batch_size, num_labels, -1)
 
     def forward(self, 
@@ -90,8 +174,6 @@ class ZeroShotJointModel(nn.Module):
         text_sequence = text_outputs.last_hidden_state
         
         # --- B. Encode Labels ---
-        # ถ้ามีส่งมา (Training) ให้ใช้ที่ส่งมา
-        # ถ้าไม่มี (Inference) ให้ใช้ที่ Cache ไว้
         if ent_label_ids is not None:
              ent_label_embeds = self.encode_labels(ent_label_ids, ent_label_mask)
              rel_label_embeds = self.encode_labels(rel_label_ids, rel_label_mask)
@@ -102,26 +184,26 @@ class ZeroShotJointModel(nn.Module):
              rel_label_embeds = self.cached_rel_embeds
 
         # --- C. Zero-shot Entity Recognition ---
-        if entity_spans is None: return None, None # ถ้าไม่มี Spans ก็จบเลย
-        # ดึง Spans (Logic เดิมที่ถูกต้องแล้ว)
+        if entity_spans is None: return None, None
+        
         span_starts = [[s[0] for s in batch_spans] for batch_spans in entity_spans]
         span_ends = [[s[1] for s in batch_spans] for batch_spans in entity_spans]
         span_embeds = self._get_span_embeddings(text_sequence, span_starts, span_ends)
         
-        # Project
-        span_embeds = self.entity_proj(span_embeds) # [Batch, Num_Spans, Hidden]
+        # Project and normalize span embeddings
+        span_embeds = self.entity_proj(span_embeds)
+        span_embeds = F.normalize(span_embeds, p=2, dim=-1)  # L2 normalize
         
-        # Calculate Entity Logits
-        # Note: Handle Broadcasting for Cached Embeds (Batch Size = 1)
-        # Matmul: [Batch, Spans, Hidden] x [..., Hidden, Labels]
+        # Cosine similarity (since both are normalized)
+        # Optionally scale by learnable temperature
         entity_logits = torch.matmul(span_embeds, ent_label_embeds.transpose(-2, -1))
+        entity_logits = entity_logits / self.temperature  # Optional: use learnable temp
         
         # --- D. Zero-shot Relation Extraction ---
         relation_logits = None
 
         if relation_pairs is None: return entity_logits, None
         
-        # 1. หาจำนวนคู่สูงสุดใน Batch นี้ เพื่อสร้าง Tensor มารอรับ
         max_pairs = 0
         for pairs in relation_pairs:
             max_pairs = max(max_pairs, len(pairs))
@@ -131,46 +213,53 @@ class ZeroShotJointModel(nn.Module):
             num_rel_labels = rel_label_embeds.shape[1]
             device = span_embeds.device
             
-            # สร้าง Tensor ว่างๆ รอไว้ (Filled with -inf or large negative is safer for masking, but 0 is ok if handled in loss)
-            # ใช้ 0.0 ไปก่อน เพราะใน train.py เราเลือก index มาคำนวณเฉพาะตัวที่มีค่า
             relation_logits = torch.zeros(batch_size, max_pairs, num_rel_labels).to(device)
             
-            # 2. วนลูปทีละ Sample ใน Batch (b)
+            # [NEW] ดึงความมั่นใจของประเภท Entity มาใช้เป็นฟีเจอร์
+            # ใช้ entity_logits ที่คำนวณมาแล้ว เพื่อหาว่าแต่ละ Span น่าจะเป็น Class ไหน
+            # entity_logits: [Batch, Num_Spans, Num_Ent_Labels]
+            best_entity_labels = torch.argmax(entity_logits, dim=-1) # [Batch, Num_Spans]
+
             for b, pairs in enumerate(relation_pairs):
-                if len(pairs) == 0:
-                    continue # ข้ามถ้าไม่มีคู่ความสัมพันธ์
+                if len(pairs) == 0: continue
                 
-                # pairs คือ list ของ tuple เช่น [(0, 1), (2, 4)]
-                # เราต้องดึง Vector ของคู่ (Subject + Object) ออกมา
-                
-                # ดึง Span Embedding ของ Sample นี้ออกมา
                 curr_span_embeds = span_embeds[b] # [Num_Spans, Hidden]
                 
+                # ดึง Embedding ของประเภท Entity ที่โมเดลทายได้ใน Batch นั้นๆ
+                # ent_label_embeds[b]: [Num_Ent_Labels, Hidden]
+                # ent_type_feats: [Num_Spans, Hidden]
+                curr_ent_label_embeds = ent_label_embeds[b]
+                ent_type_feats = curr_ent_label_embeds[best_entity_labels[b]]
+
                 pair_vecs = []
                 for subj_idx, obj_idx in pairs:
                     s_vec = curr_span_embeds[subj_idx]
                     o_vec = curr_span_embeds[obj_idx]
-                    # ต่อกันเป็น [Hidden * 2]
-                    pair_vecs.append(torch.cat([s_vec, o_vec], dim=-1))
+                    
+                    # [NEW] ดึงประเภทของ Subject และ Object มาผสม
+                    s_type = ent_type_feats[subj_idx]
+                    o_type = ent_type_feats[obj_idx]
+                    
+                    # รวมร่างฟีเจอร์: [S_vec, O_vec, S_type, O_type] 
+                    # รวม 4 ตัว -> input_dim ต้องเป็น hidden_size * 4
+                    combined_rel_feat = torch.cat([s_vec, o_vec, s_type, o_type], dim=-1)
+                    pair_vecs.append(combined_rel_feat)
                 
-                # Stack รวมเป็น [Num_Pairs_in_Sample, Hidden*2]
-                pair_batch_tensor = torch.stack(pair_vecs)
+                pair_batch_tensor = torch.stack(pair_vecs) # [Num_Pairs, Hidden*4]
                 
-                # Project ลงมาเหลือ [Num_Pairs_in_Sample, Hidden]
-                pair_proj = self.relation_proj(pair_batch_tensor)
+                # Project และ Normalize ตามสูตร Zero-shot
+                pair_proj = self.relation_proj(pair_batch_tensor) # [Num_Pairs, Hidden]
+                pair_proj = F.normalize(pair_proj, p=2, dim=-1)
                 
-                # Dot Product กับ Label ของ Sample นั้น
-                # rel_label_embeds[b] shape is [Num_Rel_Labels, Hidden]
-                
-                if rel_label_embeds.shape[0] == 1: # กรณีใช้ Cached Labels (มีแค่ 1 ชุด)
+                # ดึง Relation Label Embeddings สำหรับ Batch นี้
+                if rel_label_embeds.shape[0] == 1:
                      curr_rel_embeds = rel_label_embeds[0]
-                else: # กรณี Training (มี Labels แยกตาม Batch)
+                else:
                      curr_rel_embeds = rel_label_embeds[b]
 
-                # ผลลัพธ์ logits shape: [Num_Pairs_in_Sample, Num_Rel_Labels]
+                # คำนวณ Similarity (Dot Product / Temperature)
                 logits = torch.matmul(pair_proj, curr_rel_embeds.t())
-                
-                # เอาไปใส่ใน Tensor ใหญ่ตามตำแหน่ง
+                logits = logits / self.temperature
                 relation_logits[b, :len(pairs), :] = logits
 
         return entity_logits, relation_logits
