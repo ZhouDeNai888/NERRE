@@ -3,11 +3,1302 @@
 Generate a large multilingual training dataset for NERRE.
 Version 2: 100 Entity Types + 100 Relation Types
 Target: 10,000+ samples across 5 languages (English, Chinese, Japanese, Korean, Thai)
+
+🔥 ZERO-SHOT READY: ใช้ Generic Labels + Relation Aliases เพื่อให้ Model Generalize ได้ดี
+🔥 V3 UPDATE: Label Synonym Augmentation - สุ่มใช้คำอธิบายแทน label ตรงๆ
 """
 
 import json
 import random
 from typing import List, Dict, Any, Tuple
+
+# ============================================================================
+# 🔥 LABEL SYNONYM AUGMENTATION (Fix "Name Shifting" Problem)
+# ทำให้โมเดลจำ "ความหมาย" แทนการจำ "ตัวอักษร"
+# ============================================================================
+
+# Entity Label → [Synonyms/Descriptions that mean the same thing]
+ENTITY_LABEL_SYNONYMS = {
+    # === Person Types ===
+    "person": ["individual", "human", "someone", "a person"],
+    "politician": ["political figure", "political leader", "government official", "elected official", "public servant"],
+    "politicalparty": ["political party", "political organization", "political group", "party"],  # Cross-RE
+    "scientist": ["researcher", "research scientist", "scientific researcher", "scholar", "academic researcher"],
+    "researcher": ["scientist", "academic", "scholar", "research worker"],  # Cross-RE alias
+    "musician": ["musical artist", "music performer", "singer", "instrumentalist", "recording artist"],
+    "musicalartist": ["musician", "singer", "music performer", "recording artist", "musical performer"],  # Cross-RE
+    "writer": ["author", "novelist", "literary writer", "book author", "storyteller"],
+    "actor": ["film actor", "movie star", "performer", "thespian", "screen actor"],
+    "athlete": ["sports player", "sportsperson", "professional athlete", "sports star"],
+    "director": ["film director", "movie director", "filmmaker", "cinema director"],
+    "artist": ["visual artist", "painter", "creative artist", "fine artist"],
+    "entrepreneur": ["business founder", "startup founder", "business owner", "founder"],
+    "engineer": ["technical engineer", "engineering professional", "tech engineer"],
+    "doctor": ["physician", "medical doctor", "medical professional", "healthcare provider"],
+    "lawyer": ["attorney", "legal professional", "legal counsel", "advocate"],
+    "journalist": ["reporter", "news reporter", "media professional", "news writer"],
+    "chef": ["culinary professional", "cook", "head chef", "culinary artist"],
+    "celebrity": ["famous person", "public figure", "star", "well-known person"],
+    "professional": ["expert", "specialist", "professional worker"],
+    "author": ["writer", "book author", "novelist", "literary author"],
+    
+    # === Organization Types ===
+    "organization": ["organisation", "institution", "group", "entity", "body"],
+    "organisation": ["organization", "institution", "group", "entity"],  # Cross-RE British spelling
+    "company": ["corporation", "business", "firm", "enterprise", "business company"],
+    "startup": ["startup company", "new company", "emerging company", "tech startup"],
+    "university": ["academic institution", "higher education institution", "college", "educational institution"],
+    "government_agency": ["government body", "federal agency", "public agency", "governmental organization"],
+    "nonprofit": ["non-profit organization", "charity", "charitable organization", "NGO"],
+    "bank": ["financial institution", "banking company", "financial services company"],
+    "hospital": ["medical center", "healthcare facility", "medical institution"],
+    "research_institute": ["research center", "research organization", "research facility"],
+    "institution": ["establishment", "organization", "body", "institute"],
+    "band": ["music band", "musical group", "rock band", "music group"],  # Cross-RE
+    
+    # === Location Types ===
+    "location": ["place", "area", "site", "geographical location", "locale"],
+    "place": ["location", "spot", "site", "area"],
+    "city": ["urban area", "municipality", "town", "metropolitan area"],
+    "country": ["nation", "state", "sovereign state", "nation state"],
+    "state": ["province", "region", "territory", "administrative region"],
+    "region": ["area", "territory", "zone", "district"],
+    "building": ["structure", "edifice", "construction", "facility"],
+    "landmark": ["famous place", "notable location", "monument", "point of interest"],
+    "mountain": ["peak", "mount", "mountain peak"],
+    "river": ["waterway", "stream", "watercourse"],
+    "island": ["isle", "land mass"],
+    "continent": ["landmass", "continental region"],
+    
+    # === Creative Work Types ===
+    "movie": ["film", "motion picture", "cinema film", "feature film"],
+    "book": ["publication", "written work", "literary work", "novel"],
+    "album": ["music album", "record", "studio album", "musical recording"],  # Cross-RE
+    "song": ["musical track", "music track", "single", "musical piece"],  # Cross-RE
+    "music_album": ["album", "record", "musical recording"],
+    "tv_show": ["television show", "TV series", "television program", "TV program"],
+    "game": ["video game", "computer game", "gaming title"],
+    "artwork": ["art piece", "artistic work", "visual artwork"],
+    "creative_work": ["artistic creation", "creative piece", "work of art"],
+    "poem": ["poetry", "verse", "poetic work", "literary poem"],  # Cross-RE
+    
+    # === Product/Tech Types ===
+    "product": ["item", "goods", "merchandise", "commercial product"],
+    "software": ["computer program", "application", "software application", "program"],
+    "hardware": ["computer hardware", "device", "electronic device", "equipment"],
+    "app": ["mobile application", "software app", "mobile app"],
+    "electronics": ["electronic device", "electronic equipment", "consumer electronics"],
+    "vehicle": ["transportation", "automobile", "car", "transport vehicle"],
+    "programlang": ["programming language", "coding language", "computer language"],  # Cross-RE
+    "algorithm": ["computational method", "computer algorithm", "computational algorithm"],  # Cross-RE
+    
+    # === Science/Academic Types ===
+    "academicjournal": ["academic journal", "scientific journal", "research journal", "scholarly journal"],  # Cross-RE
+    "conference": ["academic conference", "scientific conference", "symposium", "meeting"],  # Cross-RE
+    "discipline": ["academic discipline", "field of study", "academic field", "subject area"],  # Cross-RE
+    "field": ["research field", "area of study", "domain", "specialty"],  # Cross-RE
+    "theory": ["scientific theory", "theoretical framework", "hypothesis", "theoretical model"],  # Cross-RE
+    "task": ["research task", "computational task", "problem", "challenge"],  # Cross-RE
+    "metrics": ["measurement", "evaluation metric", "performance metric", "measure"],  # Cross-RE
+    
+    # === Science/Chemistry Types (Cross-RE) ===
+    "chemicalcompound": ["chemical compound", "chemical substance", "molecule", "chemical"],
+    "chemicalelement": ["chemical element", "element", "atomic element"],
+    "protein": ["biological protein", "protein molecule", "macromolecule"],
+    "enzyme": ["biological enzyme", "catalyst", "enzymatic protein"],
+    "astronomicalobject": ["astronomical object", "celestial object", "space object", "celestial body"],
+    
+    # === Event/Time Types ===
+    "event": ["occurrence", "happening", "incident", "occasion"],
+    "election": ["political election", "voting", "electoral event", "vote"],  # Cross-RE
+    "award": ["prize", "honor", "recognition", "accolade"],
+    "competition": ["contest", "tournament", "championship"],
+    "date": ["calendar date", "specific date", "day"],
+    "year": ["calendar year", "specific year"],
+    "month": ["calendar month"],
+    "time": ["time period", "moment", "point in time"],
+    "duration": ["time span", "period", "length of time"],
+    "era": ["time period", "epoch", "age"],
+    "temporal": ["time-related", "temporal reference"],
+    
+    # === Music Types (Cross-RE) ===
+    "musicgenre": ["music genre", "musical genre", "style of music", "musical style"],
+    "musicalinstrument": ["musical instrument", "instrument", "music instrument"],
+    "literarygenre": ["literary genre", "genre of literature", "writing genre"],  # Cross-RE
+    
+    # === Other Types ===
+    "misc": ["miscellaneous", "other", "unclassified", "general entity"],  # Cross-RE - tricky one
+    "sports_team": ["athletic team", "sports club", "team", "sporting team"],
+    "disease": ["medical condition", "illness", "health condition", "ailment"],
+    "medicine": ["medication", "drug", "pharmaceutical", "medical treatment"],
+    "food": ["edible item", "cuisine", "dish", "meal"],
+    "beverage": ["drink", "liquid refreshment"],
+    "language": ["spoken language", "natural language", "tongue"],
+    "money": ["currency", "monetary amount", "financial amount"],
+    "percent": ["percentage", "proportion", "rate"],
+}
+
+# Relation Label → [Synonyms/Descriptions]  
+RELATION_LABEL_SYNONYMS = {
+    # === Employment/Affiliation ===
+    "works_at": ["employed at", "working for", "staff member of", "employee of", "affiliated with"],
+    "role": ["has role", "serves as", "functions as", "position of"],  # Cross-RE
+    "general-affiliation": ["affiliated with", "associated with", "connected to", "linked to"],  # Cross-RE
+    
+    # === Location Relations ===
+    "located_in": ["situated in", "found in", "based in", "positioned in"],
+    "org_based_in": ["headquartered in", "based in", "operates from", "main office in"],
+    "lived_in": ["resided in", "living in", "dwelling in", "home in"],
+    "born_in": ["birthplace", "born at", "native of", "originated from"],
+    "physical": ["physically located", "physical relation", "spatial relation"],  # Cross-RE
+    "origin": ["originates from", "comes from", "source of", "derived from"],  # Cross-RE
+    
+    # === Creation/Development ===
+    "creator_of": ["created", "made", "developed", "authored", "designed"],
+    "founder_of": ["founded", "established", "started", "initiated"],
+    "developed": ["built", "created", "engineered", "designed"],
+    "artifact": ["created artifact", "produced", "made thing"],  # Cross-RE
+    
+    # === Social Relations ===
+    "spouse_of": ["married to", "partner of", "wedded to"],
+    "social": ["social relation", "interpersonal relation", "social connection"],  # Cross-RE
+    "collaborates_with": ["works with", "partners with", "cooperates with"],
+    
+    # === Academic/Research ===
+    "graduated_from": ["studied at", "alumni of", "educated at", "attended"],
+    "professor_at": ["teaches at", "faculty at", "academic at"],
+    "research_at": ["researches at", "conducts research at", "studies at"],
+    "topic": ["about topic", "concerning", "regarding", "subject of"],  # Cross-RE
+    "usage": ["used for", "utilized for", "applied to", "employed for"],  # Cross-RE
+    
+    # === Performance/Entertainment ===
+    "starred_in": ["appeared in", "acted in", "performed in", "featured in"],
+    "plays_for": ["plays on", "member of team", "athlete for"],
+    "performed_at": ["performed in", "played at", "appeared at"],
+    
+    # === Business Relations ===
+    "acquired_by": ["bought by", "purchased by", "taken over by"],
+    "subsidiary_of": ["owned by", "part of", "division of"],
+    "partner_with": ["partnered with", "allied with", "in partnership with"],
+    "investor_in": ["invested in", "funding", "backed"],
+    
+    # === Temporal Relations ===
+    "founded_in": ["established in", "started in", "created in"],
+    "released_in": ["launched in", "published in", "came out in"],
+    "occurred_on": ["happened on", "took place on", "dated"],
+    "temporal": ["time relation", "when", "during"],  # Cross-RE
+    
+    # === Other Relations ===
+    "won": ["awarded", "received", "earned", "achieved"],
+    "killed_by": ["murdered by", "slain by", "victim of"],
+    "treats": ["medical treatment for", "cures", "heals"],
+    "part-of": ["component of", "belongs to", "included in", "member of"],  # Cross-RE
+    "type-of": ["kind of", "category of", "instance of", "subtype of"],  # Cross-RE
+    "named": ["called", "known as", "titled", "named as"],  # Cross-RE
+    "compare": ["compared to", "similar to", "contrasted with", "versus"],  # Cross-RE
+    "cause-effect": ["causes", "results in", "leads to", "effect of"],  # Cross-RE
+    "opposite": ["opposite of", "contrary to", "antonym of", "reverse of"],  # Cross-RE
+    "win-defeat": ["won against", "defeated", "beat", "victory over"],  # Cross-RE
+    "related-to": ["related with", "connected to", "associated with", "linked to"],  # Cross-RE
+}
+
+def get_label_synonym(label: str, label_type: str = "entity", probability: float = 0.5) -> str:
+    """
+    🔥 Label Synonym Augmentation
+    สุ่มเปลี่ยน label เป็น synonym/description เพื่อให้โมเดลเรียนรู้ความหมาย
+    
+    Args:
+        label: Original label (e.g., "scientist")
+        label_type: "entity" or "relation"
+        probability: Chance to use synonym instead of original (0.5 = 50%)
+    
+    Returns:
+        Either original label or a random synonym
+    """
+    if random.random() > probability:
+        return label
+    
+    synonyms_dict = ENTITY_LABEL_SYNONYMS if label_type == "entity" else RELATION_LABEL_SYNONYMS
+    
+    if label in synonyms_dict:
+        synonyms = synonyms_dict[label]
+        return random.choice(synonyms)
+    
+    return label
+
+
+# ============================================================================
+# CROSS-LABEL MAPPING (Hierarchical Entity Type Mapping)
+# ช่วยให้ Model เรียนรู้ความสัมพันธ์ระหว่าง Label กว้างๆ กับ Label เฉพาะเจาะจง
+# ============================================================================
+
+LABEL_HIERARCHY = {
+    # Location Hierarchy
+    "location": ["city", "country", "state", "region", "mountain", "river", "island", "continent", "neighborhood", "landmark"],
+    "place": ["location", "city", "country", "building", "airport", "stadium", "park"],
+    
+    # Organization Hierarchy
+    "organization": ["company", "startup", "university", "government_agency", "nonprofit", "bank", "hospital", "research_institute"],
+    "organization": ["company", "startup", "university", "government_agency", "nonprofit", "bank", "hospital", "research_institute"],
+    "institution": ["university", "school", "hospital", "research_institute", "museum"],
+    "business": ["company", "startup", "bank", "retailer", "manufacturer", "airline"],
+    
+    # Person Hierarchy  
+    "person": ["politician", "scientist", "artist", "athlete", "musician", "actor", "director", "author", "entrepreneur", "engineer", "doctor", "lawyer", "journalist", "chef"],
+    "professional": ["engineer", "doctor", "lawyer", "journalist", "chef", "scientist"],
+    "celebrity": ["actor", "musician", "athlete", "artist"],
+    
+    # Product Hierarchy
+    "product": ["software", "hardware", "vehicle", "food", "beverage", "medicine", "book", "movie", "game", "app", "electronics"],
+    "creative_work": ["book", "movie", "music_album", "artwork", "tv_show", "game"],
+    "tech_product": ["software", "hardware", "app", "electronics"],
+    
+    # Time Hierarchy
+    "time": ["date", "year", "month", "duration", "era", "century", "season"],
+    "temporal": ["date", "year", "month", "time", "duration"],
+}
+
+# Reverse mapping: specific → generic (for training augmentation)
+LABEL_TO_PARENT = {}
+for parent, children in LABEL_HIERARCHY.items():
+    for child in children:
+        if child not in LABEL_TO_PARENT:
+            LABEL_TO_PARENT[child] = []
+        LABEL_TO_PARENT[child].append(parent)
+
+# ============================================================================
+# RELATION ALIASES (Zero-Shot Ready)
+# แม็พ Relations ที่มีความหมายเหมือนกันเพื่อให้ Model เข้าใจหลาย Label
+# ============================================================================
+
+RELATION_ALIASES = {
+    # Employment Relations (Canonical: works_at)
+    "works_at": ["employee_of", "employed_by", "works_for", "staff_of", "member_of", "hired_by", 
+                 "position_at", "ceo_of", "manages", "leads", "director_of", "consultant_for"],
+    
+    # Organization Location (Canonical: org_based_in - CoNLL04 style)
+    "org_based_in": ["headquartered_in", "based_in", "hq_in", "main_office_in", "located_in_city", "operated_in"],
+
+    # General Location (Canonical: located_in)
+    "located_in": ["situated_in", "found_in", "exists_in", "in", "part_of", "capital_of"],
+    
+    # Residence Relations (Canonical: lived_in - CoNLL04 style)
+    "lived_in": ["lives_in", "resides_in", "dwelling_in", "home_in", "was_living_in", "resident_of"],
+    
+    # Violence Relations (Canonical: killed_by)
+    "killed_by": ["murdered_by", "assassinated_by", "slain_by", "victim_of", "died_in"],
+    
+    # Birth/Origin
+    "born_in": ["birthplace", "native_of", "from", "origin", "native_to"],
+    
+    # Education Combined (Canonical: graduated_from)
+    "graduated_from": ["studied_at", "alumni_of", "attended", "educated_at", "degree_from", "enrolled_at"],
+
+    # Creation (Canonical: creator_of - for products/works)
+    "creator_of": ["made", "invented", "designed", "built", "author_of", "composed_by", "painted_by", 
+                   "developer_of", "manufacturer_of", "produced_by", "inventor_of"],
+
+    # Founding (Canonical: founder_of - for organizations)
+    "founder_of": ["founded", "created", "established", "started", "co-founder_of", "co_founder_of"],
+    
+    # Family (Canonical: spouse_of, parent_of, child_of - Neutral/Inclusive)
+    "spouse_of": ["married_to", "wife_of", "husband_of", "partner_of", "married_on"],
+    "parent_of": ["father_of", "mother_of"],
+    "child_of": ["son_of", "daughter_of"],
+    
+    # Time (Canonical: founded_in)
+    "founded_in": ["established_in", "started_in", "formed_in"],
+}
+
+# สร้าง Reverse Mapping: alias → canonical
+ALIAS_TO_CANONICAL = {}
+for canonical, aliases in RELATION_ALIASES.items():
+    for alias in aliases:
+        if alias not in ALIAS_TO_CANONICAL:
+            ALIAS_TO_CANONICAL[alias] = canonical
+    ALIAS_TO_CANONICAL[canonical] = canonical  # map to itself too
+
+# ============================================================================
+# SENTENCE STYLE TEMPLATES (Formal, News, Narrative, Casual)
+# ป้องกัน Model Overfitting บน Template เฉพาะเจาะจง
+# ============================================================================
+
+SENTENCE_STYLES = {
+    "formal": {
+        "en": {
+            "founder_of": [
+                "{person} established {company} in {date}.",
+                "{person} is the founder and chairman of {company}.",
+                "The establishment of {company} was undertaken by {person}.",
+            ],
+            "ceo_of": [
+                "{person} serves as the Chief Executive Officer of {company}.",
+                "{person} holds the position of CEO at {company}.",
+                "The chief executive role at {company} is held by {person}.",
+            ],
+            "works_at": [
+                "{person} is currently employed at {company}.",
+                "{person} holds a position at {company}.",
+                "{person} maintains employment with {company}.",
+            ],
+            "located_in": [
+                "{company} is situated in {city}.",
+                "{company} maintains its operations in {city}.",
+                "The headquarters of {company} is located in {city}.",
+            ],
+            "graduated_from": [
+                "{person} completed their education at {university}.",
+                "{person} obtained their degree from {university}.",
+                "{person} is an alumnus of {university}.",
+            ],
+        },
+        "zh": {
+            "founder_of": [
+                "{person}於{date}正式創立了{company}。",
+                "{person}是{company}的創始人兼董事長。",
+            ],
+            "ceo_of": [
+                "{person}目前擔任{company}的首席執行官一職。",
+                "{person}現任{company}執行長。",
+            ],
+        },
+        "th": {
+            "founder_of": [
+                "{person} เป็นผู้ก่อตั้ง {company} เมื่อปี {date}",
+                "{person} ดำรงตำแหน่งประธานผู้ก่อตั้งของ {company}",
+            ],
+            "ceo_of": [
+                "{person} ดำรงตำแหน่งประธานเจ้าหน้าที่บริหารของ {company}",
+                "{person} เป็นซีอีโอของบริษัท {company}",
+            ],
+        },
+    },
+    "news": {
+        "en": {
+            "founder_of": [
+                "Tech mogul {person} founded {company}, according to reports.",
+                "{person}, the billionaire entrepreneur, launched {company} in {date}.",
+                "Breaking: {company} was founded by {person}, sources confirm.",
+            ],
+            "ceo_of": [
+                "{person} has been named CEO of {company}, the company announced.",
+                "{company} appoints {person} as new chief executive.",
+                "In a major move, {person} takes the helm at {company}.",
+            ],
+            "works_at": [
+                "{person} has joined {company}, according to insider sources.",
+                "Sources say {person} is now working at {company}.",
+                "{person} reportedly started at {company} this quarter.",
+            ],
+            "acquired_by": [
+                "In a landmark deal, {company} has acquired {startup}.",
+                "{startup} was purchased by {company} in a multi-billion dollar deal.",
+                "Breaking: {company} completes acquisition of {startup}.",
+            ],
+            "won": [
+                "{person} wins prestigious {award}, stunning critics.",
+                "{award} goes to {person} at tonight's ceremony.",
+                "In a surprise upset, {person} took home the {award}.",
+            ],
+        },
+        "zh": {
+            "founder_of": [
+                "據報導，科技巨頭{person}創立了{company}。",
+                "獨家：{person}於{date}成立{company}，震撼業界。",
+            ],
+            "acquired_by": [
+                "重磅消息：{company}宣布收購{startup}。",
+                "{company}以天價收購{startup}，震動市場。",
+            ],
+        },
+        "th": {
+            "founder_of": [
+                "รายงาน: {person} ผู้ก่อตั้ง {company} ในปี {date}",
+                "ข่าวด่วน! {person} ประกาศจัดตั้ง {company}",
+            ],
+            "acquired_by": [
+                "ดีลใหญ่! {company} เข้าซื้อกิจการ {startup}",
+                "{company} ประกาศซื้อ {startup} อย่างเป็นทางการ",
+            ],
+        },
+    },
+    "narrative": {
+        "en": {
+            "founder_of": [
+                "It was {date} when {person} decided to start {company}.",
+                "The story of {company} began with {person}'s vision.",
+                "{person} had always dreamed of creating {company}.",
+                "Little did anyone know that {person} would one day build {company}.",
+            ],
+            "ceo_of": [
+                "{person} rose through the ranks to become CEO of {company}.",
+                "After years of hard work, {person} finally led {company}.",
+                "The journey of {person} at {company} is truly inspiring.",
+            ],
+            "works_at": [
+                "{person} found their calling at {company}.",
+                "Every day, {person} walks into {company} with a purpose.",
+                "{person}'s story at {company} is just beginning.",
+            ],
+            "born_in": [
+                "{person} grew up in {city}, dreaming of bigger things.",
+                "The streets of {city} shaped {person}'s early years.",
+                "{person} was born and raised in {city}.",
+            ],
+            "graduated_from": [
+                "{person} spent their formative years studying at {university}.",
+                "It was at {university} where {person} discovered their passion.",
+                "After graduating from {university}, {person}'s career took off.",
+            ],
+        },
+        "zh": {
+            "founder_of": [
+                "故事始於{date}，當{person}決定創立{company}時。",
+                "{company}的傳奇，要從{person}的夢想說起。",
+            ],
+            "born_in": [
+                "{person}在{city}長大，從小就有遠大的夢想。",
+                "{city}是{person}的故鄉，也是他夢想開始的地方。",
+            ],
+        },
+        "th": {
+            "founder_of": [
+                "เรื่องราวเริ่มต้นเมื่อ {person} ตัดสินใจก่อตั้ง {company}",
+                "{person} มีความฝันที่จะสร้าง {company} มาตลอด",
+            ],
+            "born_in": [
+                "{person} เติบโตขึ้นที่ {city} พร้อมกับความฝันอันยิ่งใหญ่",
+                "ถนนทุกสายใน {city} หล่อหลอมให้ {person} เป็นอย่างทุกวันนี้",
+            ],
+        },
+    },
+    "casual": {
+        "en": {
+            "founder_of": [
+                "So {person} basically started {company}, pretty cool right?",
+                "You know {person}? Yeah, they're the one who made {company}.",
+                "{person} created {company} - can you believe it?",
+            ],
+            "ceo_of": [
+                "{person} is like the boss of {company} now.",
+                "Guess who runs {company}? {person}!",
+                "{person}'s the big CEO over at {company}.",
+            ],
+            "works_at": [
+                "{person} works at {company}, you know.",
+                "Did you hear? {person} got a job at {company}.",
+                "{person}'s doing their thing over at {company}.",
+            ],
+            "lives_in": [
+                "{person} lives in {city} these days.",
+                "Last I heard, {person} moved to {city}.",
+                "{person}'s been hanging out in {city} lately.",
+            ],
+            "graduated_from": [
+                "{person} went to {university}, pretty impressive huh?",
+                "So {person} graduated from {university}.",
+                "{person}'s a {university} alum, you know.",
+            ],
+            "starred_in": [
+                "Did you see {actor} in {movie}? So good!",
+                "{actor} was in {movie}, it was amazing.",
+                "I can't believe {actor} starred in {movie}!",
+            ],
+            "plays_for": [
+                "{athlete} plays for {sports_team} now.",
+                "Hey, {athlete} is on {sports_team}!",
+                "{athlete}'s rocking it at {sports_team}.",
+            ],
+        },
+        "zh": {
+            "founder_of": [
+                "你知道嗎？{company}是{person}創的耶！",
+                "{person}搞了個{company}，厲害吧？",
+            ],
+            "lives_in": [
+                "{person}現在住在{city}啦。",
+                "聽說{person}搬到{city}了。",
+            ],
+            "graduated_from": [
+                "{person}是{university}畢業的欸～",
+                "你知道{person}讀{university}嗎？",
+            ],
+        },
+        "th": {
+            "founder_of": [
+                "รู้ไหม {person} เป็นคนตั้ง {company} เอง!",
+                "{person} สร้าง {company} ขึ้นมาเลยนะ เจ๋งมาก!",
+            ],
+            "lives_in": [
+                "{person} อยู่ {city} ตอนนี้",
+                "ได้ยินว่า {person} ย้ายไปอยู่ {city} แล้ว",
+            ],
+            "graduated_from": [
+                "{person} จบจาก {university} นะเธอ",
+                "เก่งมาก {person} เรียนจบจาก {university}",
+            ],
+            "works_at": [
+                "{person} ทำงานที่ {company} นะ",
+                "ได้ข่าวว่า {person} ไปทำ {company} แล้ว",
+            ],
+        },
+        "ja": {
+            "founder_of": [
+                "知ってる？{company}は{person}が作ったんだよ！",
+                "{person}が{company}を始めたんだって、すごいよね。",
+            ],
+            "works_at": [
+                "{person}は{company}で働いてるみたい。",
+                "聞いた？{person}が{company}に入ったって。",
+            ],
+        },
+        "ko": {
+            "founder_of": [
+                "알아? {person}이 {company} 만들었대!",
+                "{person}이 {company} 창업했다더라, 대박이지?",
+            ],
+            "works_at": [
+                "{person}이 {company}에서 일해.",
+                "들었어? {person}이 {company}에 입사했대.",
+            ],
+        },
+    },
+    "question": {
+        "en": {
+            "founder_of": [
+                "Did you know that {person} founded {company}?",
+                "Who founded {company}? It was {person}.",
+                "Can you believe {person} started {company}?",
+            ],
+            "ceo_of": [
+                "Who is the CEO of {company}? {person}.",
+                "Did you hear that {person} became CEO of {company}?",
+                "Isn't {person} the one running {company}?",
+            ],
+            "works_at": [
+                "Does {person} still work at {company}?",
+                "I wonder if {person} is at {company}.",
+                "Is it true that {person} joined {company}?",
+            ],
+            "graduated_from": [
+                "Did {person} really graduate from {university}?",
+                "Where did {person} study? {university}, right?",
+                "Is {person} a {university} graduate?",
+            ],
+        },
+        "zh": {
+            "founder_of": [
+                "你知道{company}是{person}創立的嗎？",
+                "{company}是誰創的？是{person}。",
+            ],
+            "ceo_of": [
+                "{company}的執行長是誰？是{person}。",
+                "聽說{person}當上{company}的CEO了？",
+            ],
+        },
+        "th": {
+            "founder_of": [
+                "รู้ไหมว่า {person} ก่อตั้ง {company}?",
+                "ใครก่อตั้ง {company}? คือ {person} นะ",
+            ],
+            "works_at": [
+                "{person} ยังทำงานที่ {company} อยู่ไหม?",
+                "จริงเหรอที่ {person} เข้าทำงานที่ {company}?",
+            ],
+        },
+    },
+}
+
+def get_styled_template(relation_type: str, lang: str = "en", style: str = None) -> str:
+    """
+    ดึง Template ตาม Style ที่กำหนด หรือสุ่มถ้าไม่ระบุ
+    """
+    if style is None:
+        style = random.choice(list(SENTENCE_STYLES.keys()))
+    
+    style_templates = SENTENCE_STYLES.get(style, {}).get(lang, {}).get(relation_type, [])
+    
+    if style_templates:
+        return random.choice(style_templates), style
+    
+    return None, style
+
+def apply_label_mapping_augmentation(entity_type: str, probability: float = 0.4) -> str:
+    """
+    สุ่มเปลี่ยน Label เฉพาะเจาะจงเป็น Label กว้างๆ (หรือกลับกัน)
+    เพื่อให้ Model เรียนรู้ความสัมพันธ์ระหว่าง Label
+    
+    🔥 INCREASED PROBABILITY: 40% (was 30%) for better zero-shot generalization
+    """
+    if random.random() > probability:
+        return entity_type
+    
+    # 60% โอกาสเปลี่ยนเป็น Parent Label (เพิ่มจาก 50%)
+    if entity_type in LABEL_TO_PARENT and random.random() < 0.6:
+        parent = random.choice(LABEL_TO_PARENT[entity_type])
+        return parent
+    
+    # 40% โอกาสเปลี่ยนเป็น Sibling Label (Label อื่นในกลุ่มเดียวกัน)
+    if entity_type in LABEL_TO_PARENT:
+        parent = random.choice(LABEL_TO_PARENT[entity_type])
+        siblings = LABEL_HIERARCHY.get(parent, [])
+        if siblings:
+            return random.choice(siblings)
+    
+    return entity_type
+
+def canonicalize_relation_label(relation_type: str) -> str:
+    """
+    🔥 Strategy 1: Label Consolidation
+    Collapse overlapping relations to a single canonical label to increase support.
+    e.g. "ceo_of", "employed_by" -> "works_at"
+    """
+    if relation_type in ALIAS_TO_CANONICAL:
+        return ALIAS_TO_CANONICAL[relation_type]
+    
+    return relation_type
+
+
+# ============================================================================
+# 🔥 ZERO-SHOT READY TEMPLATES - Using GENERIC Labels Directly
+# ทำให้ Model เรียนรู้ "location" โดยตรง ไม่ใช่แค่ "city", "country"
+# ============================================================================
+
+GENERIC_ENTITY_TEMPLATES = [
+    # === Location / Organization (CoNLL04 style) ===
+    (
+        "{person1} works at {organization}.",
+        [("person1", "person"), ("organization", "organization")],
+        [("person1", "organization", "employee_of")]  # CoNLL04 label
+    ),
+    (
+        "{person1} was employed by {organization}.",
+        [("person1", "person"), ("organization", "organization")],
+        [("person1", "organization", "employee_of")]
+    ),
+    (
+        "{organization} is based in {location}.",
+        [("organization", "organization"), ("location", "location")],
+        [("organization", "location", "org_based_in")]  # CoNLL04 label
+    ),
+    (
+        "{organization} has its headquarters in {location}.",
+        [("organization", "organization"), ("location", "location")],
+        [("organization", "location", "org_based_in")]
+    ),
+    (
+        "{person1} lived in {location}.",
+        [("person1", "person"), ("location", "location")],
+        [("person1", "location", "lived_in")]  # CoNLL04 label
+    ),
+    (
+        "{person1} was born in {location}.",
+        [("person1", "person"), ("location", "location")],
+        [("person1", "location", "born_in")]
+    ),
+    (
+        "{person1} resides in {location}.",
+        [("person1", "person"), ("location", "location")],
+        [("person1", "location", "lived_in")]
+    ),
+    # === killed_by (CoNLL04 specific) ===
+    (
+        "{person1} was killed by {person2}.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]  # CoNLL04 label
+    ),
+    (
+        "{person2} killed {person1} in the incident.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    (
+        "{person1} was murdered by {person2}.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    (
+        "{person1} was assassinated by {person2}.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    (
+        "{person2} shot and killed {person1}.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    # === Generic Work Relations ===
+    (
+        "{person1} is an employee of {organization}.",
+        [("person1", "person"), ("organization", "organization")],
+        [("person1", "organization", "employee_of")]
+    ),
+    (
+        "{person1} serves as a member of {organization}.",
+        [("person1", "person"), ("organization", "organization")],
+        [("person1", "organization", "employee_of")]
+    ),
+    # === Generic Location with Various Prepositions ===
+    (
+        "{organization} operates in {location}.",
+        [("organization", "organization"), ("location", "location")],
+        [("organization", "location", "org_based_in")]
+    ),
+    (
+        "{organization} was founded in {location}.",
+        [("organization", "organization"), ("location", "location")],
+        [("organization", "location", "org_based_in")]
+    ),
+    (
+        "{person1} grew up in {location}.",
+        [("person1", "person"), ("location", "location")],
+        [("person1", "location", "lived_in")]
+    ),
+    (
+        "{person1} spent their childhood in {location}.",
+        [("person1", "person"), ("location", "location")],
+        [("person1", "location", "lived_in")]
+    ),
+    # === Complex Multi-Relation with Generic Labels ===
+    (
+        "{person1}, who works at {organization} in {location}, is a renowned expert.",
+        [("person1", "person"), ("organization", "organization"), ("location", "location")],
+        [("person1", "organization", "employee_of"), ("organization", "location", "org_based_in")]
+    ),
+    (
+        "{person1} joined {organization}, which is headquartered in {location}.",
+        [("person1", "person"), ("organization", "organization"), ("location", "location")],
+        [("person1", "organization", "employee_of"), ("organization", "location", "org_based_in")]
+    ),
+    (
+        "{person1} was born in {location1} but now lives in {location2}.",
+        [("person1", "person"), ("location1", "location"), ("location2", "location")],
+        [("person1", "location1", "born_in"), ("person1", "location2", "lived_in")]
+    ),
+]
+
+# ============================================================================
+# 🔥 CROSS-RE STYLE TEMPLATES (สำหรับ Zero-Shot บน Cross-RE Dataset)
+# Labels: politicalparty, musicalartist, band, album, song, etc.
+# Relations: role, part-of, origin, physical, topic, etc.
+# ============================================================================
+
+CROSS_RE_STYLE_TEMPLATES = [
+    # === Political Domain ===
+    (
+        "{politician} is a member of the {politicalparty}.",
+        [("politician", "politician"), ("politicalparty", "politicalparty")],
+        [("politician", "politicalparty", "general-affiliation")]
+    ),
+    (
+        "{politician} represents the {politicalparty} in parliament.",
+        [("politician", "politician"), ("politicalparty", "politicalparty")],
+        [("politician", "politicalparty", "role")]
+    ),
+    (
+        "The {politicalparty} nominated {politician} as their candidate.",
+        [("politicalparty", "politicalparty"), ("politician", "politician")],
+        [("politician", "politicalparty", "general-affiliation")]
+    ),
+    (
+        "{politician} left the {politicalparty} to join another party.",
+        [("politician", "politician"), ("politicalparty", "politicalparty")],
+        [("politician", "politicalparty", "general-affiliation")]
+    ),
+    (
+        "{politician} won the {election} representing the {politicalparty}.",
+        [("politician", "politician"), ("election", "election"), ("politicalparty", "politicalparty")],
+        [("politician", "election", "win-defeat"), ("politician", "politicalparty", "general-affiliation")]
+    ),
+    (
+        "The {election} was contested between {politician} and other candidates.",
+        [("election", "election"), ("politician", "politician")],
+        [("politician", "election", "role")]
+    ),
+    
+    # === Music Domain ===
+    (
+        "{musicalartist} is the lead singer of {band}.",
+        [("musicalartist", "musicalartist"), ("band", "band")],
+        [("musicalartist", "band", "part-of")]
+    ),
+    (
+        "{band} released their new {album} last month.",
+        [("band", "band"), ("album", "album")],
+        [("band", "album", "artifact")]
+    ),
+    (
+        "The {song} is from {musicalartist}'s latest {album}.",
+        [("song", "song"), ("musicalartist", "musicalartist"), ("album", "album")],
+        [("song", "album", "part-of"), ("musicalartist", "album", "artifact")]
+    ),
+    (
+        "{musicalartist} performed the {song} at the concert.",
+        [("musicalartist", "musicalartist"), ("song", "song")],
+        [("musicalartist", "song", "artifact")]
+    ),
+    (
+        "{band} is known for their {musicgenre} style.",
+        [("band", "band"), ("musicgenre", "musicgenre")],
+        [("band", "musicgenre", "general-affiliation")]
+    ),
+    (
+        "The {album} features songs in the {musicgenre} genre.",
+        [("album", "album"), ("musicgenre", "musicgenre")],
+        [("album", "musicgenre", "type-of")]
+    ),
+    (
+        "{musicalartist} plays the {musicalinstrument} in the band.",
+        [("musicalartist", "musicalartist"), ("musicalinstrument", "musicalinstrument")],
+        [("musicalartist", "musicalinstrument", "usage")]
+    ),
+    
+    # === Science/AI Domain ===
+    (
+        "{scientist} published a paper on {algorithm}.",
+        [("scientist", "scientist"), ("algorithm", "algorithm")],
+        [("scientist", "algorithm", "topic")]
+    ),
+    (
+        "{researcher} developed the {algorithm} at {university}.",
+        [("researcher", "researcher"), ("algorithm", "algorithm"), ("university", "university")],
+        [("researcher", "algorithm", "artifact"), ("researcher", "university", "general-affiliation")]
+    ),
+    (
+        "The {algorithm} was presented at {conference}.",
+        [("algorithm", "algorithm"), ("conference", "conference")],
+        [("algorithm", "conference", "temporal")]
+    ),
+    (
+        "{scientist} won the {award} for their research on {field}.",
+        [("scientist", "scientist"), ("award", "award"), ("field", "field")],
+        [("scientist", "award", "win-defeat"), ("scientist", "field", "topic")]
+    ),
+    (
+        "The {theory} was proposed by {scientist} in the {academicjournal}.",
+        [("theory", "theory"), ("scientist", "scientist"), ("academicjournal", "academicjournal")],
+        [("scientist", "theory", "artifact"), ("theory", "academicjournal", "physical")]
+    ),
+    (
+        "{researcher} specializes in {discipline} at {university}.",
+        [("researcher", "researcher"), ("discipline", "discipline"), ("university", "university")],
+        [("researcher", "discipline", "topic"), ("researcher", "university", "general-affiliation")]
+    ),
+    (
+        "The {metrics} is commonly used to evaluate {task}.",
+        [("metrics", "metrics"), ("task", "task")],
+        [("metrics", "task", "usage")]
+    ),
+    (
+        "{programlang} is the preferred language for implementing {algorithm}.",
+        [("programlang", "programlang"), ("algorithm", "algorithm")],
+        [("programlang", "algorithm", "usage")]
+    ),
+    
+    # === Chemistry/Biology Domain ===
+    (
+        "The {chemicalcompound} was discovered by {scientist}.",
+        [("chemicalcompound", "chemicalcompound"), ("scientist", "scientist")],
+        [("scientist", "chemicalcompound", "artifact")]
+    ),
+    (
+        "{protein} interacts with {enzyme} in the cell.",
+        [("protein", "protein"), ("enzyme", "enzyme")],
+        [("protein", "enzyme", "physical")]
+    ),
+    (
+        "{chemicalelement} is a key component of {chemicalcompound}.",
+        [("chemicalelement", "chemicalelement"), ("chemicalcompound", "chemicalcompound")],
+        [("chemicalelement", "chemicalcompound", "part-of")]
+    ),
+    
+    # === Literature Domain ===
+    (
+        "{writer} wrote the {book} in the {literarygenre} style.",
+        [("writer", "writer"), ("book", "book"), ("literarygenre", "literarygenre")],
+        [("writer", "book", "artifact"), ("book", "literarygenre", "type-of")]
+    ),
+    (
+        "The {poem} by {writer} won the {award}.",
+        [("poem", "poem"), ("writer", "writer"), ("award", "award")],
+        [("writer", "poem", "artifact"), ("poem", "award", "win-defeat")]
+    ),
+    
+    # === Astronomy Domain ===
+    (
+        "{scientist} discovered the {astronomicalobject}.",
+        [("scientist", "scientist"), ("astronomicalobject", "astronomicalobject")],
+        [("scientist", "astronomicalobject", "artifact")]
+    ),
+    (
+        "The {astronomicalobject} is located in the {location} constellation.",
+        [("astronomicalobject", "astronomicalobject"), ("location", "location")],
+        [("astronomicalobject", "location", "physical")]
+    ),
+    
+    # === Cross-RE Specific Relations ===
+    (
+        "{person} is also known as {misc}.",
+        [("person", "person"), ("misc", "misc")],
+        [("person", "misc", "named")]
+    ),
+    (
+        "The {algorithm} is similar to {algorithm2} but more efficient.",
+        [("algorithm", "algorithm"), ("algorithm2", "algorithm")],
+        [("algorithm", "algorithm2", "compare")]
+    ),
+    (
+        "{event} led to the formation of {organisation}.",
+        [("event", "event"), ("organisation", "organisation")],
+        [("event", "organisation", "cause-effect")]
+    ),
+    (
+        "Unlike {method1}, {method2} uses a different approach.",
+        [("method1", "algorithm"), ("method2", "algorithm")],
+        [("method1", "method2", "opposite")]
+    ),
+    (
+        "The {concept1} is related to {concept2} in several ways.",
+        [("concept1", "misc"), ("concept2", "misc")],
+        [("concept1", "concept2", "related-to")]
+    ),
+    (
+        "{person1} collaborated with {person2} on the project.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "social")]
+    ),
+    (
+        "The conference was held in {location}, {country}.",
+        [("location", "location"), ("country", "country")],
+        [("location", "country", "physical")]
+    ),
+    (
+        "{organisation} originated from {country}.",
+        [("organisation", "organisation"), ("country", "country")],
+        [("organisation", "country", "origin")]
+    ),
+]
+
+# === CONLL04-STYLE TEMPLATES (Specific to that dataset's relations) ===
+CONLL04_STYLE_TEMPLATES = [
+    # Employee_Of variations
+    (
+        "{person1}, a longtime employee of {organization}, announced their retirement.",
+        [("person1", "person"), ("organization", "organization")],
+        [("person1", "organization", "employee_of")]
+    ),
+    (
+        "According to sources, {person1} has been working at {organization} for many years.",
+        [("person1", "person"), ("organization", "organization")],
+        [("person1", "organization", "employee_of")]
+    ),
+    (
+        "{person1} started their career at {organization}.",
+        [("person1", "person"), ("organization", "organization")],
+        [("person1", "organization", "works_at")]  # Also train on works_at
+    ),
+    # Org_Based_In variations
+    (
+        "The {organization}, based in {location}, reported strong earnings.",
+        [("organization", "organization"), ("location", "location")],
+        [("organization", "location", "org_based_in")]
+    ),
+    (
+        "{location} is home to {organization}, a major employer in the region.",
+        [("organization", "organization"), ("location", "location")],
+        [("organization", "location", "org_based_in")]
+    ),
+    # Lived_In variations  
+    (
+        "{person1}, a resident of {location}, was interviewed yesterday.",
+        [("person1", "person"), ("location", "location")],
+        [("person1", "location", "lived_in")]
+    ),
+    (
+        "During the 1990s, {person1} lived in {location}.",
+        [("person1", "person"), ("location", "location")],
+        [("person1", "location", "lived_in")]
+    ),
+    (
+        "{person1} moved to {location} in search of better opportunities.",
+        [("person1", "person"), ("location", "location")],
+        [("person1", "location", "lived_in")]
+    ),
+    # Killed_By variations (news style)
+    (
+        "{person1} was fatally shot by {person2} yesterday.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    (
+        "In a tragic turn of events, {person2} killed {person1}.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    (
+        "{person1} died after being attacked by {person2}.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    (
+        "Police confirmed that {person1} was murdered by {person2}.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+]
+
+# ============================================================================
+# 🔥 LINGUISTIC PARAPHRASE TEMPLATES
+# หนีจาก Template! ใช้ Passive Voice, Appositive, Relative Clause
+# ============================================================================
+
+LINGUISTIC_PARAPHRASE_TEMPLATES = [
+    # =====================================================================
+    # PASSIVE VOICE - ประธานถูกกระทำ
+    # =====================================================================
+    # works_at / employee_of (Passive)
+    (
+        "{organization} employed {person1} as a senior executive.",
+        [("organization", "organization"), ("person1", "person")],
+        [("person1", "organization", "works_at")]
+    ),
+    (
+        "{person1} was hired by {organization} last year.",
+        [("person1", "person"), ("organization", "organization")],
+        [("person1", "organization", "works_at")]
+    ),
+    (
+        "A position at {organization} was offered to {person1}.",
+        [("organization", "organization"), ("person1", "person")],
+        [("person1", "organization", "works_at")]
+    ),
+    
+    # located_in / org_based_in (Passive)
+    (
+        "{location} is where {organization} has established its headquarters.",
+        [("location", "location"), ("organization", "organization")],
+        [("organization", "location", "located_in")]
+    ),
+    (
+        "The main office of {organization} was set up in {location}.",
+        [("organization", "organization"), ("location", "location")],
+        [("organization", "location", "located_in")]
+    ),
+    
+    # lived_in (Passive)
+    (
+        "{location} was where {person1} spent most of their life.",
+        [("location", "location"), ("person1", "person")],
+        [("person1", "location", "lived_in")]
+    ),
+    (
+        "{person1} was raised in {location} before moving abroad.",
+        [("person1", "person"), ("location", "location")],
+        [("person1", "location", "lived_in")]
+    ),
+    
+    # killed_by (Passive - already passive, add variations)
+    (
+        "{person1} was shot dead by {person2} during the conflict.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    (
+        "The death of {person1} was caused by {person2}.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    
+    # =====================================================================
+    # APPOSITIVE - คำขยายความหลังคอมม่า
+    # =====================================================================
+    # works_at with Appositive
+    (
+        "{person1}, an engineer, works at {organization}.",
+        [("person1", "person"), ("organization", "organization")],
+        [("person1", "organization", "works_at")]
+    ),
+    (
+        "{person1}, a senior manager, is employed by {organization}.",
+        [("person1", "person"), ("organization", "organization")],
+        [("person1", "organization", "works_at")]
+    ),
+    (
+        "{organization}, a leading tech company, employs {person1}.",
+        [("organization", "organization"), ("person1", "person")],
+        [("person1", "organization", "works_at")]
+    ),
+    
+    # located_in with Appositive
+    (
+        "{organization}, a multinational corporation, is headquartered in {location}.",
+        [("organization", "organization"), ("location", "location")],
+        [("organization", "location", "located_in")]
+    ),
+    (
+        "{location}, a major business hub, hosts the headquarters of {organization}.",
+        [("location", "location"), ("organization", "organization")],
+        [("organization", "location", "located_in")]
+    ),
+    
+    # lived_in with Appositive
+    (
+        "{person1}, a former resident, lived in {location} for decades.",
+        [("person1", "person"), ("location", "location")],
+        [("person1", "location", "lived_in")]
+    ),
+    (
+        "{location}, a coastal city, was home to {person1}.",
+        [("location", "location"), ("person1", "person")],
+        [("person1", "location", "lived_in")]
+    ),
+    
+    # killed_by with Appositive
+    (
+        "{person1}, a prominent figure, was killed by {person2}.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    (
+        "{person2}, a suspect, allegedly killed {person1}.",
+        [("person2", "person"), ("person1", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    
+    # =====================================================================
+    # RELATIVE CLAUSE - ประโยคย่อยขยายความ (who, which, that, where)
+    # =====================================================================
+    # works_at with Relative Clause
+    (
+        "{person1}, who joined recently, works at {organization}.",
+        [("person1", "person"), ("organization", "organization")],
+        [("person1", "organization", "works_at")]
+    ),
+    (
+        "{organization}, which was founded in 1990, employs {person1}.",
+        [("organization", "organization"), ("person1", "person")],
+        [("person1", "organization", "works_at")]
+    ),
+    (
+        "The company that hired {person1} is {organization}.",
+        [("person1", "person"), ("organization", "organization")],
+        [("person1", "organization", "works_at")]
+    ),
+    (
+        "{person1} is employed by {organization}, which is known for innovation.",
+        [("person1", "person"), ("organization", "organization")],
+        [("person1", "organization", "works_at")]
+    ),
+    
+    # located_in with Relative Clause
+    (
+        "{organization}, which operates globally, is based in {location}.",
+        [("organization", "organization"), ("location", "location")],
+        [("organization", "location", "located_in")]
+    ),
+    (
+        "{location}, where many companies are located, hosts {organization}.",
+        [("location", "location"), ("organization", "organization")],
+        [("organization", "location", "located_in")]
+    ),
+    (
+        "The city where {organization} has its headquarters is {location}.",
+        [("organization", "organization"), ("location", "location")],
+        [("organization", "location", "located_in")]
+    ),
+    
+    # lived_in with Relative Clause
+    (
+        "{person1}, who grew up there, lived in {location}.",
+        [("person1", "person"), ("location", "location")],
+        [("person1", "location", "lived_in")]
+    ),
+    (
+        "{location}, where {person1} resided, is a beautiful place.",
+        [("location", "location"), ("person1", "person")],
+        [("person1", "location", "lived_in")]
+    ),
+    (
+        "The city that {person1} called home was {location}.",
+        [("person1", "person"), ("location", "location")],
+        [("person1", "location", "lived_in")]
+    ),
+    
+    # killed_by with Relative Clause
+    (
+        "{person1}, who was unarmed, was killed by {person2}.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    (
+        "{person2}, who fled the scene, killed {person1}.",
+        [("person2", "person"), ("person1", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    (
+        "The person that killed {person1} was {person2}.",
+        [("person1", "person"), ("person2", "person")],
+        [("person1", "person2", "killed_by")]
+    ),
+    
+    # =====================================================================
+    # COMPLEX COMBINATIONS - Passive + Appositive + Relative
+    # =====================================================================
+    (
+        "{person1}, a distinguished scientist who studied at Oxford, works at {organization}, which is headquartered in {location}.",
+        [("person1", "person"), ("organization", "organization"), ("location", "location")],
+        [("person1", "organization", "works_at"), ("organization", "location", "located_in")]
+    ),
+    (
+        "{organization}, a company that was founded in {location}, has employed {person1} since 2010.",
+        [("organization", "organization"), ("location", "location"), ("person1", "person")],
+        [("organization", "location", "located_in"), ("person1", "organization", "works_at")]
+    ),
+    (
+        "{person1}, who previously lived in {location1}, now resides in {location2} and works at {organization}.",
+        [("person1", "person"), ("location1", "location"), ("location2", "location"), ("organization", "organization")],
+        [("person1", "location1", "lived_in"), ("person1", "location2", "lived_in"), ("person1", "organization", "works_at")]
+    ),
+    (
+        "In {location}, where {organization} is based, {person1} was hired as the new director.",
+        [("location", "location"), ("organization", "organization"), ("person1", "person")],
+        [("organization", "location", "located_in"), ("person1", "organization", "works_at")]
+    ),
+    (
+        "{person1}, an employee of {organization}, lived in {location} before relocating.",
+        [("person1", "person"), ("organization", "organization"), ("location", "location")],
+        [("person1", "organization", "works_at"), ("person1", "location", "lived_in")]
+    ),
+    
+    # =====================================================================
+    # INVERTED WORD ORDER - สลับลำดับคำ
+    # =====================================================================
+    (
+        "Based in {location} is {organization}, a Fortune 500 company.",
+        [("location", "location"), ("organization", "organization")],
+        [("organization", "location", "located_in")]
+    ),
+    (
+        "Working at {organization} is {person1}, a top executive.",
+        [("organization", "organization"), ("person1", "person")],
+        [("person1", "organization", "works_at")]
+    ),
+    (
+        "Living in {location} is {person1}, a retired professor.",
+        [("location", "location"), ("person1", "person")],
+        [("person1", "location", "lived_in")]
+    ),
+    (
+        "At {organization}, {person1} serves as the chief scientist.",
+        [("organization", "organization"), ("person1", "person")],
+        [("person1", "organization", "works_at")]
+    ),
+    (
+        "In {location}, {organization} maintains its global headquarters.",
+        [("location", "location"), ("organization", "organization")],
+        [("organization", "location", "located_in")]
+    ),
+]
 
 # ============================================================================
 # 100 ENTITY TYPES - Organized by Category
@@ -32,7 +1323,8 @@ ENTITY_TYPES = {
     "chef": "A professional cook, executive chef, or culinary expert specializing in food preparation and kitchen management.",
     
     # === ORGANIZATION (20 types) ===
-    "organisation": "A general group of people, association, or organized body with a particular purpose, not fitting other specific categories.",
+    "organization": "A general group of people, association, or organized body with a particular purpose, not fitting other specific categories.",
+
     "company": "A business corporation, commercial firm, enterprise, or profit-seeking entity providing goods or services.",
     "startup": "A young, newly established entrepreneurial venture or high-growth company, often in the early stages of development or technology focus.",
     "nonprofit": "A non-profit organization (NGO), charity, foundation, or voluntary association operating for social or public benefit rather than profit.",
@@ -162,6 +1454,13 @@ ENTITY_TYPES = {
     "disease": "A specific medical condition, illness, sickness, disorder, or physical symptom affecting the health of an individual.",
     "medicine": "A pharmaceutical drug, chemical compound, medication, or vaccine used to treat, prevent, or cure medical diseases.",
     "organ": "A specific body part, internal organ, or biological system within a living organism, such as the heart, lung, or immune system.",
+    
+    # === NATURE (2 types) ===
+    "animal": "A living organism belonging to the kingdom Animalia, including mammals, birds, reptiles, and fish.",
+    "plant": "A living organism belonging to the kingdom Plantae, including trees, flowers, herbs, and shrubs.",
+    
+    # === OBJECTS (1 type) ===
+    "instrument": "A device created or adapted to make musical sounds, played by a musician.",
 
 
 }
@@ -172,114 +1471,166 @@ ENTITY_TYPES = {
 
 RELATION_TYPES = {
     # === CREATION/OWNERSHIP (15 types) ===
-    "founder_of": ("person", "organisation", "Founded/created an organization"),
-    "ceo_of": ("person", "organisation", "Is CEO/leader of"),
-    "owner_of": ("person", "organisation", "Owns"),
-    "creator_of": ("person", "product", "Created a product/work"),
-    "inventor_of": ("person", "invention", "Invented"),
-    "author_of": ("person", "book", "Wrote/authored"),
-    "director_of": ("person", "movie", "Directed a film"),
-    "producer_of": ("person", "product", "Produced"),
-    "designed_by": ("product", "person", "Was designed by"),
-    "developed": ("organisation", "product", "Developed a product"),
-    "manufactured_by": ("product", "organisation", "Made by"),
-    "published_by": ("book", "organisation", "Published by"),
-    "composed_by": ("music_album", "musician", "Composed/written by"),
-    "painted_by": ("artwork", "artist", "Painted by"),
-    "patented_by": ("patent", "person", "Patented by"),
+    "founder_of": ("person", "organization", "Established or started a new company, institution, or group from the beginning"),
+    "ceo_of": ("person", "organization", "Is the highest-ranking executive officer in a business or corporate organization"),
+    "owner_of": ("person", "organization", "Legally possesses or holds the title of ownership over an entity or property"),
+    "creator_of": ("person", "product", "The person responsible for the artistic or intellectual creation of a creative work"),
+    "inventor_of": ("person", "invention", "The person who conceived and designed a new, unique technological device or process"),
+    "author_of": ("person", "book", "The person who wrote the original literary content of a book, novel, or document"),
+    "director_of": ("person", "movie", "The person who oversaw the creative aspects and directed the actors in a movie or film"),
+    "producer_of": ("person", "product", "The person or group responsible for the financial and administrative management of a creative product"),
+    "designed_by": ("product", "person", "The aesthetic or functional plan of a product was created by this specific person"),
+    "developed": ("organization", "product", "A company or organization that engineered and brought a new product or software to market"),
+    "manufactured_by": ("product", "organization", "The physical production or assembly of a product was done by this industrial company"),
+    "published_by": ("book", "organization", "The publishing house or company that printed and distributed a book or written work"),
+    "composed_by": ("music_album", "musician", "Composed/written by this specific musician or composer"),
+    "painted_by": ("artwork", "artist", "The artwork was created/painted by this specific artist"),
+    "patented_by": ("patent", "person", "A specific individual who was legally granted a patent for an invention by a government authority"),
     
     # === LOCATION (12 types) ===
-    "located_in": ("organisation", "location", "Located in"),
-    "headquartered_in": ("company", "city", "Has headquarters in"),
-    "born_in": ("person", "location", "Was born in"),
-    "died_in": ("person", "location", "Died in"),
-    "lives_in": ("person", "city", "Lives/resides in"),
-    "operates_in": ("company", "country", "Operates in"),
-    "based_in": ("organisation", "city", "Based in"),
-    "filmed_in": ("movie", "location", "Filmed in"),
-    "held_in": ("event", "location", "Held/took place in"),
-    "native_to": ("person", "country", "Native to"),
-    "capital_of": ("city", "country", "Is capital of"),
-    "part_of": ("location", "location", "Is part of"),
+    "located_in": ("organization", "location", "An organization or physical entity is geographically situated within a specific location"),
+    "headquartered_in": ("company", "city", "A business company has its primary administrative office in this specific city"),
+    "born_in": ("person", "location", "A human being was physically born at this geographic location or country"),
+    "died_in": ("person", "location", "A human being passed away or died at this specific geographic location"),
+    "lives_in": ("person", "city", "A person currently resides or has their home in this specific city or town"),
+    "operates_in": ("company", "country", "A commercial company conducts its business activities within this specific country"),
+    "based_in": ("organization", "city", "The main operations or headquarters of an organization are situated in this city"),
+    "filmed_in": ("movie", "location", "The production of a movie took place at this specific geographic location"),
+    "held_in": ("event", "location", "An organized event or occurrence took place at this specific location"),
+    "native_to": ("person", "country", "A person originally comes from or has ancestral roots in this specific country"),
+    "capital_of": ("city", "country", "This city serves as the official seat of government for a sovereign country"),
+    "part_of": ("location", "location", "A smaller geographic area is contained within or belongs to a larger region or territory"),
     
     # === TIME (10 types) ===
-    "founded_in": ("organisation", "date", "Founded in year"),
-    "released_in": ("product", "date", "Released in year"),
-    "born_on": ("person", "date", "Born on date"),
-    "died_on": ("person", "date", "Died on date"),
-    "started_in": ("event", "date", "Started in"),
-    "ended_in": ("event", "date", "Ended in"),
-    "established_in": ("organisation", "date", "Established in"),
-    "occurred_on": ("event", "date", "Occurred on"),
-    "graduated_in": ("person", "date", "Graduated in"),
-    "married_on": ("person", "date", "Married on"),
+    "founded_in": ("organization", "date", "A business or organization was officially established in this specific calendar year"),
+    "released_in": ("product", "date", "A product was made available to the public in this specific calendar year"),
+    "born_on": ("person", "date", "A human being's date of birth is this specific calendar day"),
+    "died_on": ("person", "date", "A human being's date of death is this specific calendar day"),
+    "started_in": ("event", "date", "An organized event or occurrence began in this specific calendar year"),
+    "ended_in": ("event", "date", "An organized event or occurrence concluded in this specific calendar year"),
+    "established_in": ("organization", "date", "A business or organization was officially established in this specific calendar year"),
+    "occurred_on": ("event", "date", "An organized event or occurrence took place on this specific calendar day"),
+    "graduated_in": ("person", "date", "A person completed their academic degree or education in this specific calendar year"),
+    "married_on": ("person", "date", "Two individuals were legally wed on this specific calendar day"),
     
     # === EMPLOYMENT (10 types) ===
-    "works_at": ("person", "organisation", "Works at"),
-    "employed_by": ("person", "company", "Employed by"),
-    "position_at": ("person", "organisation", "Has position at"),
-    "manages": ("person", "organisation", "Manages"),
-    "leads": ("person", "organisation", "Leads"),
-    "reports_to": ("person", "person", "Reports to"),
-    "hired_by": ("person", "company", "Was hired by"),
-    "resigned_from": ("person", "company", "Resigned from"),
-    "retired_from": ("person", "organisation", "Retired from"),
-    "consultant_for": ("person", "company", "Consultant for"),
+    "works_at": ("person", "organization", "Is employed by or works for a specific organization or company"),
+    "employed_by": ("person", "company", "Is hired and receives a salary from a specific business or corporate entity"),
+    "position_at": ("person", "organization", "Holds a specific job title or role within an organization or company"),
+    "manages": ("person", "organization", "Oversees and is responsible for the operations of a specific organization or team"),
+    "leads": ("person", "organization", "Directs and guides a specific organization, department, or group of people"),
+    "reports_to": ("person", "person", "Is subordinate to and takes instructions from another individual in a hierarchy"),
+    "hired_by": ("person", "company", "Was recruited and brought on board by a specific business or corporate entity"),
+    "resigned_from": ("person", "company", "Voluntarily left or quit a position at a specific organization or company"),
+    "retired_from": ("person", "organization", "Ended their professional career at a specific organization or company"),
+    "consultant_for": ("person", "company", "Provides expert advice and services to a specific business or corporate entity"),
     
     # === EDUCATION (8 types) ===
-    "studied_at": ("person", "university", "Studied at"),
-    "graduated_from": ("person", "university", "Graduated from"),
-    "degree_from": ("person", "university", "Got degree from"),
-    "professor_at": ("scientist", "university", "Professor at"),
-    "teaches_at": ("person", "school", "Teaches at"),
-    "research_at": ("scientist", "research_institute", "Does research at"),
-    "alumni_of": ("person", "university", "Alumni of"),
-    "dropout_from": ("person", "university", "Dropped out from"),
+    "studied_at": ("person", "university", "Attended as a student at a specific educational institution"),
+    "graduated_from": ("person", "university", "Completed a degree or academic program at a specific educational institution"),
+    "degree_from": ("person", "university", "Earned an academic degree from a specific educational institution"),
+    "professor_at": ("scientist", "university", "Holds a teaching or research position at a specific university or college"),
+    "teaches_at": ("person", "school", "Is an instructor or educator at a specific school or educational institution"),
+    "research_at": ("scientist", "research_institute", "Conducts scientific research at a specific research institute or laboratory"),
+    "alumni_of": ("person", "university", "Is a former student or graduate of a specific educational institution"),
+    "dropout_from": ("person", "university", "Left or discontinued studies at a specific educational institution before graduation"),
     
-    # === FAMILY (8 types) ===
-    "spouse_of": ("person", "person", "Married to"),
-    "parent_of": ("person", "person", "Parent of"),
-    "child_of": ("person", "person", "Child of"),
-    "sibling_of": ("person", "person", "Sibling of"),
-    "relative_of": ("person", "person", "Relative of"),
-    "married_to": ("person", "person", "Married to"),
-    "divorced_from": ("person", "person", "Divorced from"),
-    "partner_of": ("person", "person", "Partner of"),
+    # === FAMILY (20 types) ===
+    "spouse_of": ("person", "person", "Legally married partner of another individual"),
+    "parent_of": ("person", "person", "Biological or adoptive mother or father of a child"),
+    "child_of": ("person", "person", "Biological or adopted son or daughter of a parent"),
+    "sibling_of": ("person", "person", "Brother or sister sharing at least one parent"),
+    "relative_of": ("person", "person", "A family member or kinship relation between two individuals"),
+    "married_to": ("person", "person", "Legally wedded to another individual"),
+    "divorced_from": ("person", "person", "Legally ended marriage with another individual"),
+    "partner_of": ("person", "person", "In a romantic or domestic partnership with another individual"),
+    "father_of": ("person", "person", "Biological or adoptive male parent of a child"),
+    "mother_of": ("person", "person", "Biological or adoptive female parent of a child"),
+    "son_of": ("person", "person", "Biological or adopted male child of a parent"),
+    "daughter_of": ("person", "person", "Biological or adopted female child of a parent"),
+    "brother_of": ("person", "person", "Biological or adopted   male sibling"),
+    "sister_of": ("person", "person", "Biological or adopted female sibling"),
+    "grandparent_of": ("person", "person", "Biological or adoptive grandmother or grandfather of a grandchild"),
+    "grandchild_of": ("person", "person", "Biological or adopted grandson or granddaughter of a grandparent"),
+    "aunt_of": ("person", "person", "Biological or adoptive sister of a parent"),
+    "uncle_of": ("person", "person", "Biological or adoptive brother of a parent"),
+    "cousin_of": ("person", "person", "Child of an aunt or uncle"),
+    "niece_of": ("person", "person", "Daughter of a sibling"),
+    "nephew_of": ("person", "person", "Son of a sibling"),
+
+
     
-    # === BUSINESS (12 types) ===
-    "subsidiary_of": ("company", "company", "Subsidiary of"),
-    "acquired_by": ("company", "company", "Acquired by"),
-    "merged_with": ("company", "company", "Merged with"),
-    "partner_with": ("company", "company", "Partner with"),
-    "competitor_of": ("company", "company", "Competes with"),
-    "investor_in": ("person", "company", "Invested in"),
-    "invested_by": ("startup", "company", "Received investment from"),
-    "supplies_to": ("company", "company", "Supplies to"),
-    "customer_of": ("company", "company", "Customer of"),
-    "distributor_of": ("company", "product", "Distributes"),
-    "licensed_by": ("product", "company", "Licensed by"),
-    "sponsored_by": ("event", "company", "Sponsored by"),
-    
-    # === ASSOCIATION (8 types) ===
-    "member_of": ("person", "organisation", "Member of"),
-    "affiliated_with": ("person", "organisation", "Affiliated with"),
+    # === BUSINESS (35 types) ===
+    "subsidiary_of": ("company", "company", "A company that is completely or partly owned and controlled by another company"),
+    "acquired_by": ("company", "company", "Was purchased or taken over by another company"),
+    "merged_with": ("company", "company", "Combined with another company to form a single entity"),
+    "partner_with": ("company", "company", "Has a formal business partnership or collaboration with another company"),
+    "competitor_of": ("company", "company", "Operates in the same market and offers similar products or services as another company"),
+    "investor_in": ("person", "company", "Provided capital or funding to a specific business or startup"),
+    "invested_by": ("startup", "company", "Received investment or funding from a specific business or investor"),
+    "supplies_to": ("company", "company", "Provides goods or services to another company as a supplier"),
+    "customer_of": ("company", "company", "Purchases products or services from another company as a client"),
+    "distributor_of": ("company", "product", "Acts as a middleman to sell and distribute products for another company"),
+    "licensed_by": ("product", "company", "Was granted legal permission to use or sell a product by a specific company"),
+    "sponsored_by": ("event", "company", "Received financial support or sponsorship from a specific business or organization"),
+    "endorsed_by": ("product", "person", "Was publicly supported or promoted by a specific individual or celebrity"),
+    "franchise_of": ("company", "company", "Operates under the brand and business model of a larger parent company"),
+    "head_coach_of": ("person", "sports_team", "Is the main coach responsible for training and leading a sports team"),
+    "team_captain_of": ("person", "sports_team", "Is the designated leader and representative of a sports team"),
+    "signed_by": ("athlete", "sports_team", "Was officially contracted to play for a specific sports team"),
+    "endorses_product": ("person", "product", "Publicly supports or promotes a specific product or brand"),
+    "sells": ("retailer", "product", "Offers specific products for sale to consumers"),
+    "distributes": ("company", "product", "Handles the logistics and distribution of products to retailers or customers"),
+    "manufactures": ("manufacturer", "product", "Produces and assembles specific products in a factory or industrial setting"),
+    "exports_to": ("company", "country", "Sends goods or services to another country for sale or trade"),
+    "imports_from": ("company", "country", "Brings in goods or services from another country for domestic use"),
+    "listed_on": ("company", "stock_symbol", "Is publicly traded on a specific stock exchange under a ticker symbol"),
+    "traded_on": ("stock_symbol", "bank", "Is bought and sold on a specific stock exchange or financial market"),
+    "headquartered_at": ("organization", "address", "The main office location of an organization is situated at this specific address"),
+    "leads":("person","person","Is the leader of a specific group or organization"),
+    "founded":("person","organization","Established or started a new company, institution, or group from the beginning"),
+    "owns":("person","organization","Legally possesses or holds the title of ownership over an entity or property"),
+    "created":("person","product","The person responsible for the artistic or intellectual creation of a creative work"),
+    "subordinate_of":("person","person","Is under the authority or control of another individual in a hierarchy"),
+    "employs":("organization","person","Hires and pays a person to work for the organization"),
+    "trains":("person","person","Provides instruction and skill development to another individual"),
+    "mentors":("person","person","Offers guidance and advice to a less experienced individual"),
+    "collaborates_with":("organization","organization","Works jointly with another organization on a project or initiative"),
+
+    # === ASSOCIATION (20 types) ===
+    "member_of": ("person", "organization", "Member of"),
+    "affiliated_with": ("person", "organization", "Affiliated with"),
     "belongs_to": ("product", "company", "Belongs to"),
     "represents": ("person", "country", "Represents"),
-    "ambassador_for": ("person", "organisation", "Ambassador for"),
+    "ambassador_for": ("person", "organization", "Ambassador for"),
     "spokesperson_for": ("person", "company", "Spokesperson for"),
     "endorses": ("person", "product", "Endorses"),
     "supports": ("person", "political_party", "Supports"),
+    "advocates_for": ("person", "cause", "Advocates for"),
+    "donated_to": ("person", "nonprofit", "Donated to"),
+    "volunteers_at": ("person", "nonprofit", "Volunteers at"),
+    "member_of_team": ("athlete", "sports_team", "Member of team"),
+    "represented_by": ("athlete", "agent", "Represented by"),
+    "sponsored": ("athlete", "company", "Sponsored by"),
+    "trained_by": ("athlete", "coach", "Trained by"),
+    "competes_in": ("athlete", "competition", "Competes in"),
+    "holds_membership_in": ("person", "organization", "Holds membership in"),
+    "certified_by": ("person", "organization", "Certified by"),
+    "accredited_by": ("organization", "organization", "Accredited by"),
+    "licensed_to": ("person", "organization", "Licensed to"),
+
     
     # === AWARDS & ACHIEVEMENTS (7 types) ===
     "won": ("person", "award", "Won award"),
     "nominated_for": ("person", "award", "Nominated for"),
     "recipient_of": ("person", "award", "Recipient of"),
-    "awarded_by": ("award", "organisation", "Awarded by"),
-    "achieved": ("person", "title", "Achieved title"),
+    "awarded_by": ("award", "organization", "Awarded by"),
+    "achieved": ("person", "title", "A person earned or was granted a formal honorific title or status"),
     "holds_record": ("person", "event", "Holds record in"),
     "champion_of": ("athlete", "competition", "Champion of"),
     
-    # === MEDIA & ENTERTAINMENT (10 types) ===
+
+    # === MEDIA & ENTERTAINMENT (20 types) ===
     "starred_in": ("actor", "movie", "Starred in"),
     "appeared_in": ("person", "tv_show", "Appeared in"),
     "performed_at": ("musician", "event", "Performed at"),
@@ -290,9 +1641,19 @@ RELATION_TYPES = {
     "coached_by": ("athlete", "person", "Coached by"),
     "signed_with": ("athlete", "sports_team", "Signed with"),
     "transferred_to": ("athlete", "sports_team", "Transferred to"),
+    "directed_by": ("movie", "director", "Directed by"),
+    "produced_by": ("movie", "producer", "Produced by"),
+    "written_by": ("movie", "author", "Written by"),
+    "composed_for": ("musician", "movie", "Composed music for"),
+    "published_by": ("book", "publisher", "Published by"),
+    "adapted_from": ("movie", "book", "Adapted from"),
+    "based_on": ("movie", "real_event", "Based on a real event or story"),
+    "remake_of": ("movie", "movie", "Remake of an earlier film"),
+    "sequel_to": ("movie", "movie", "Sequel to a previous film"),
+    "prequel_to": ("movie", "movie", "Prequel to a later film"),
+    
 
-
-    # === FINANCIAL (8 types) ===
+    # === FINANCIAL (30 types) ===
     "has_net_worth": ("person", "money", "Has a total estimated net worth of"),
     "valuation_of": ("money", "company", "The market valuation of a company"),
     "invested_amount": ("person", "money", "Amount invested by a person"),
@@ -301,74 +1662,128 @@ RELATION_TYPES = {
     "sold_for": ("product", "money", "Product or company sold for this amount"),
     "revenue_of": ("company", "money", "Annual or period revenue of a company"),
     "salary_of": ("person", "money", "Estimated salary or compensation of a person"),
+    "funded_amount": ("company", "money", "Amount of funding raised by a company"),
+    "acquisition_cost": ("company", "money", "Cost of acquiring another company"),
+    "profit_of": ("company", "money", "Net profit or earnings of a company"),
+    "loss_of": ("company", "money", "Financial loss incurred by a company"),
+    "dividend_yield": ("company", "percent", "Dividend yield percentage of a company"),
+    "interest_rate_of": ("bank", "percent", "Interest rate offered by a bank"),
+    "loan_amount": ("person", "money", "Amount of loan taken by a person"),
+    "credit_score_of": ("person", "number", "Credit score of a person"),
+    "budget_of": ("organization", "money", "Allocated budget for a project or department"),
+    "expenditure_of": ("organization", "money", "Total expenditure or spending of an organization"),
+    "tax_rate_of": ("company", "percent", "Corporate tax rate applicable to a company"),
+    "financial_aid_of": ("person", "money", "Amount of financial aid received by a person"),
+    "sponsorship_amount": ("event", "money", "Amount of sponsorship funding for an event"),
+    "royalty_rate": ("product", "percent", "Royalty rate percentage for a licensed product"),
+    "subscription_fee": ("service", "money", "Fee charged for a subscription service"),
+    "transaction_amount": ("person", "money", "Amount involved in a financial transaction"),
+    "asset_value": ("company", "money", "Total value of assets owned by a company"),
+    "liability_amount": ("company", "money", "Total liabilities owed by a company"),
+    "equity_percentage": ("person", "percent", "Percentage of equity ownership held by a person"),
+    "diversified_portfolio": ("person", "investment", "Has a diversified investment portfolio"),
+    "financial_institution_of": ("person", "bank", "Primary financial institution used by a person"),
+    "credit_limit_of": ("person", "money", "Credit limit assigned to a person by a financial institution"),
 
 
-    # === DIGITAL & MARKET (5 types) ===
-    "official_website": ("organisation", "url", "The official URL of an organization"),
+    # === DIGITAL & MARKET (20 types) ===
+    "official_website": ("organization", "url", "The official URL of an organization"),
     "listed_as": ("company", "stock_symbol", "Company is listed under this ticker symbol"),
     "download_url": ("software", "url", "The download link for a software/app"),
     "social_media": ("person", "url", "Social media profile link of a person"),
     "trading_on": ("stock_symbol", "bank", "Stock symbol traded on a specific exchange"),
+    "customer_support_email": ("company", "email", "Customer support email address of a company"),
+    "contact_number": ("organization", "phone_number", "Contact phone number of an organization"),
+    "ip_registered_to": ("ip_address", "organization", "The organization to which an IP address is registered"),
+    "website_hosted_by": ("url", "organization", "The hosting provider of a website"),
+    "app_available_on": ("app", "platform", "The platform where an app is available for download"),
+    "uses_protocol": ("software", "protocol", "The network protocol used by a software application"),
+    "built_with_framework": ("software", "framework", "The software framework used to build an application"),
+    "powered_by_ai_model": ("software", "ai_model", "The AI model that powers a software application"),
+    "stores_data_in": ("software", "database", "The database system used to store data for a software application"),
+    "supports_language": ("software", "programlang", "The programming language supported by a software application"),
+    "runs_on_os": ("software", "os", "The operating system on which a software application runs"),
+    "accepts_payment_in": ("ecommerce_platform", "cryptocurrency", "The cryptocurrency accepted as payment by an e-commerce platform"),
+    "uses_algorithm": ("software", "algorithm", "The specific algorithm implemented in a software application"),
+    "offers_subscription_at": ("service", "money", "The subscription fee charged by a digital service"),
+    "provides_api": ("software", "api", "The API offered by a software application for integration"),
 
 
-    # === HEALTHCARE (5 types) ===
-    "treats": ("medicine", "disease", "Medicine or drug used to treat a condition"),
+    # === HEALTHCARE (20 types) ===
+    "treats": ("medicine", "disease", "A pharmaceutical substance or clinical therapy used by doctors to cure a specific illness"),
     "diagnosed_with": ("person", "disease", "Person diagnosed with a medical condition"),
     "affects": ("disease", "organ", "Disease that affects specific body parts"),
     "dosage_of": ("medicine", "quantity", "Recommended dosage amount"),
     "developed_vaccine": ("company", "medicine", "Company developed a specific vaccine"),
-
-
-    "governs": ("organisation", "location", "Governs/rules over a territory"),
-    "head_of_state": ("person", "country", "Is the primary leader of a country"),
-    "member_of_parliament": ("person", "organisation", "Member of a legislative body"),
-    "allied_with": ("country", "country", "Has a formal alliance with"),
-    "sanctioned_by": ("person", "organisation", "Was sanctioned or penalized by"),
-    "ratified": ("organisation", "legal_document", "Formally approved a treaty or law"),
-    "vetoed_by": ("legal_document", "person", "Was rejected by a leader"),
-    "enforced_by": ("legal_document", "organisation", "Is implemented by an agency"),
-
-    "scientific_discovery": ("scientist", "invention", "Discovered a new phenomenon/entity"),
-    "published_in": ("research_paper", "journal", "Was published in a specific journal"),
-    "cited_by": ("research_paper", "research_paper", "Was referenced by another study"),
-    "collaborated_with": ("scientist", "scientist", "Worked together on research"),
-    "funded_by": ("research_at", "organisation", "Research was financed by"),
-    "hypothesis_of": ("theory", "scientist", "Proposed as a scientific explanation"),
-    "clinical_trial_of": ("medicine", "disease", "Undergoing testing for a condition"),
-    "sequenced": ("scientist", "gene", "Mapped the genetic sequence of"),
-    "peer_reviewed_by": ("research_paper", "scientist", "Verified by an independent expert"),
-    "experimental_data_from": ("research_paper", "research_institute", "Data collected at this facility"),
-
-
-    "launched_by": ("satellite", "organisation", "Sent into space by"),
-    "orbits": ("celestial_object", "celestial_object", "Moves in orbit around"),
-    "landed_on": ("spacecraft", "celestial_object", "Successfully landed on"),
-    "observed_by": ("celestial_object", "research_institute", "Monitored by an observatory"),
-    "mission_of": ("spacecraft", "organisation", "Is a project of a space agency"),
-    "reusable_launch_vehicle": ("rocket", "organisation", "Developed a reusable rocket"),
-
-
-    "plaintiff_in": ("person", "legal_case", "The party bringing the lawsuit"),
-    "defendant_in": ("person", "legal_case", "The party being sued/accused"),
-    "presided_over_by": ("legal_case", "judge", "The judge in charge of the case"),
-    "convicted_of": ("person", "crime", "Found guilty of a specific offense"),
-    "settled_with": ("company", "company", "Reached an out-of-court agreement"),
-    "infringes_on": ("product", "patent", "Violates existing intellectual property"),
-    "compliant_with": ("organisation", "legal_document", "Follows specific regulations"),
-
-    "exhibited_at": ("artwork", "museum", "Currently displayed at"),
-    "discovered_at": ("archaeological_site", "location", "Site was found in"),
-    "excavated_by": ("archaeological_site", "scientist", "Systematically dug up by"),
-    "dated_to": ("artifact", "date", "Origins traced back to this era"),
-    "restored_by": ("artwork", "organisation", "Repaired/preserved by"),
-    "historical_figure_in": ("person", "event", "A key person in a past event"),
-    "influenced_by": ("artist", "person", "Artistic style shaped by"),
-    "dedicated_to": ("monument", "person", "Built in honor of"),
+    "approved_by": ("medicine", "regulatory_agency", "Medicine approved by a health authority"),
+    "side_effects_of": ("medicine", "symptom", "Adverse side effects caused by a medicine"),
+    "prescribed_for": ("medicine", "disease", "Medicine prescribed to treat a specific illness"),
+    "clinical_trial_conducted_by": ("medicine", "research_institute", "Clinical trial conducted by a research institute"),
+    "symptom_of": ("disease", "symptom", "A specific symptom associated with a disease"),
+    "transmitted_by": ("disease", "vector", "Disease transmitted through a specific vector"),
+    "prevented_by": ("disease", "medicine", "Disease that can be prevented by a specific medicine or vaccine"),
+    "cured_by": ("disease", "medicine", "Disease that can be cured by a specific medicine or treatment"),
+    "diagnosed_at": ("person", "hospital", "Person diagnosed at a specific medical facility"),
+    "treated_at": ("person", "hospital", "Person treated at a specific medical facility"),
+    "research_on": ("scientist", "disease", "Scientist conducting research on a specific disease"),
+    "genetic_marker_for": ("gene", "disease", "A specific gene associated with a disease"),
+    "vaccine_for": ("medicine", "disease", "A vaccine developed to protect against a specific disease"),
+    "approved_for_use_by": ("medicine", "regulatory_agency", "Medicine approved for use by a health authority"),
+    "manufactured_at": ("medicine", "pharmaceutical_company", "Medicine manufactured at a specific pharmaceutical company"),
 
 
 
+    "governs": ("organization", "location", "Has official authority over a geographic area"),
+    "head_of_state": ("person", "country", "A person serving as the formal leader of a sovereign nation, such as a monarch or president"),
+    "member_of_parliament": ("person", "organization", "An elected representative serving in a legislative body"),
+    "allied_with": ("country", "country", "Has a formal alliance or partnership with another country"),
+    "sanctioned_by": ("person", "organization", "Was penalized or restricted by a governing body"),
+    "ratified": ("organization", "legal_document", "Formally approved or confirmed a legal document or treaty"),
+    "vetoed_by": ("legal_document", "person", "Was rejected or blocked by a specific individual with veto power"),
+    "enforced_by": ("legal_document", "organization", "Is implemented and upheld by a specific governing body"),
+
+    "scientific_discovery": ("scientist", "invention", "Made a significant scientific breakthrough or invention"),
+    "published_in": ("research_paper", "journal", "Was published in a specific academic journal"),
+    "cited_by": ("research_paper", "research_paper", "Referenced in another research paper"),
+    "collaborated_with": ("scientist", "scientist", "Worked jointly with another scientist on research"),
+    "funded_by": ("research_at", "organization", "Received financial support from an organization"),
+    "hypothesis_of": ("theory", "scientist", "Proposed by a specific scientist"),
+    "clinical_trial_of": ("medicine", "disease", "Tested in clinical trials for a specific disease"),
+    "sequenced": ("scientist", "gene", "Determined the order of nucleotides in a specific gene"),
+    "peer_reviewed_by": ("research_paper", "scientist", "Evaluated by experts in the field before publication"),
+    "experimental_data_from": ("research_paper", "research_institute", "Data collected from experiments conducted at a research institute"),
 
 
+    "launched_by": ("satellite", "organization", "Sent into space by a specific space agency or company"),
+    "orbits": ("celestial_object", "celestial_object", "Revolves around another celestial body"),
+    "landed_on": ("spacecraft", "celestial_object", "Successfully touched down on the surface of a celestial body"),
+    "observed_by": ("celestial_object", "research_institute", "Studied or monitored by a specific research institute"),
+    "mission_of": ("spacecraft", "organization", "A specific space mission undertaken by an organization"),
+    "reusable_launch_vehicle": ("rocket", "organization", "A rocket designed for multiple launches by a specific organization"),
+
+
+    "plaintiff_in": ("person", "legal_case", "The party bringing a lawsuit"),
+    "defendant_in": ("person", "legal_case", "The party being sued or accused in a legal case"),
+    "presided_over_by": ("legal_case", "judge", "The judge who oversaw a legal case"),
+    "convicted_of": ("person", "crime", "Found guilty of a specific criminal offense"),
+    "settled_with": ("company", "company", "Resolved a legal dispute with another company"),
+    "infringes_on": ("product", "patent", "Violates the intellectual property rights of a patented invention"),
+    "compliant_with": ("organization", "legal_document", "Adheres to the regulations outlined in a legal document"),
+
+    "exhibited_at": ("artwork", "museum", "Displayed at a specific museum or gallery"),
+    "discovered_at": ("archaeological_site", "location", "Found at a specific geographic location"),
+    "excavated_by": ("archaeological_site", "scientist", "Unearthed or dug up by a specific archaeologist or team"),
+    "dated_to": ("artifact", "date", "Estimated to originate from a specific historical period or calendar year"),
+    "restored_by": ("artwork", "organization", "Repaired or preserved by a specific organization"),
+    "historical_figure_in": ("person", "event", "A person who played a significant role in a historical event"),
+    "influenced_by": ("artist", "person", "Artistic style or work was influenced by another individual"),
+    "dedicated_to": ("monument", "person", "A monument or structure is dedicated in honor of a specific individual"),
+
+    # === NEW RELATIONS ===
+    "speaks": ("person", "language", "The person speaks, writes, or communicates in this language"),
+    "plays": ("musician", "instrument", "The musician plays this musical instrument"),
+    "found_in": ("animal", "location", "The animal is naturally found or lives in this location"),
+    "eats": ("animal", "food", "The animal consumes this food"),
 
 }
 
@@ -395,234 +1810,636 @@ EN_ENTITIES = {
     ],
     "politician": [
         "Barack Obama", "Donald Trump", "Joe Biden", "Angela Merkel", "Emmanuel Macron",
-        "Justin Trudeau", "Boris Johnson", "Vladimir Putin", "Xi Jinping", "Narendra Modi"
+        "Justin Trudeau", "Boris Johnson", "Vladimir Putin", "Xi Jinping", "Narendra Modi",
+        "Kamala Harris", "Jacinda Ardern", "Sanna Marin", "Pedro Sánchez", "Cyril Ramaphosa",
+        "Ursula von der Leyen", "Giorgia Meloni", "Yoshihide Suga", "Scott Morrison", "Imran Khan",
+        "Recep Tayyip Erdoğan", "Mohammed bin Salman", "Sheikh Hasina", "Alexander De Croo", "Mette Frederiksen"
+        
     ],
     "scientist": [
         "Albert Einstein", "Stephen Hawking", "Marie Curie", "Isaac Newton", "Charles Darwin",
         "Nikola Tesla", "Richard Feynman", "Neil deGrasse Tyson", "Michio Kaku", "Jane Goodall",
-        "Geoffrey Hinton", "Yann LeCun", "Yoshua Bengio", "Fei-Fei Li", "Demis Hassabis"
+        "Geoffrey Hinton", "Yann LeCun", "Yoshua Bengio", "Fei-Fei Li", "Demis Hassabis",
+        "Jennifer Doudna", "Emmanuelle Charpentier", "Katalin Karikó", "Frances Arnold", "Sara Seager",
+        "Tim Berners-Lee", "Ada Lovelace", "Rosalind Franklin", "Carl Sagan", "James Watson"
     ],
     "artist": [
         "Leonardo da Vinci", "Pablo Picasso", "Vincent van Gogh", "Claude Monet", "Andy Warhol",
-        "Salvador Dalí", "Frida Kahlo", "Banksy", "Yayoi Kusama", "Ai Weiwei"
+        "Salvador Dalí", "Frida Kahlo", "Banksy", "Yayoi Kusama", "Ai Weiwei",
+        "Georgia O'Keeffe", "Jackson Pollock", "Henri Matisse", "Edvard Munch", "Gustav Klimt",
+        "Rembrandt", "Michelangelo", "Raphael", "Caravaggio", "Paul Cézanne"
     ],
     "athlete": [
         "Michael Jordan", "LeBron James", "Cristiano Ronaldo", "Lionel Messi", "Serena Williams",
         "Tiger Woods", "Roger Federer", "Usain Bolt", "Muhammad Ali", "Tom Brady",
-        "Naomi Osaka", "Lewis Hamilton", "Michael Phelps", "Simone Biles", "Kobe Bryant"
+        "Naomi Osaka", "Lewis Hamilton", "Michael Phelps", "Simone Biles", "Kobe Bryant",
+        "Stephen Curry", "Rafael Nadal", "Novak Djokovic", "Megan Rapinoe", "Kevin Durant",
+        "Virat Kohli", "Kylian Mbappé", "Eliud Kipchoge", "Caeleb Dressel", "Sydney McLaughlin",
+        "Sifan Hassan", "Allyson Felix", "Katie Ledecky", "Gabby Douglas", "Shaun White",
+        "Carli Lloyd", "James Harden", "Anthony Joshua", "Canelo Álvarez", "Conor McGregor", "Simone Manuel"
     ],
     "musician": [
         "Taylor Swift", "Beyoncé", "Ed Sheeran", "Drake", "The Weeknd",
         "BTS", "Ariana Grande", "Bruno Mars", "Lady Gaga", "Rihanna",
-        "Adele", "Justin Bieber", "Billie Eilish", "Coldplay", "Dua Lipa"
+        "Adele", "Justin Bieber", "Billie Eilish", "Coldplay", "Dua Lipa",
+        "Kendrick Lamar", "Post Malone", "Olivia Rodrigo", "Shawn Mendes", "Harry Styles",
+        "Lizzo", "Doja Cat", "Sam Smith", "Halsey", "Miley Cyrus"
     ],
     "actor": [
         "Leonardo DiCaprio", "Tom Hanks", "Meryl Streep", "Robert Downey Jr.", "Scarlett Johansson",
         "Dwayne Johnson", "Jennifer Lawrence", "Brad Pitt", "Angelina Jolie", "Chris Hemsworth",
-        "Keanu Reeves", "Will Smith", "Emma Watson", "Timothée Chalamet", "Zendaya"
+        "Keanu Reeves", "Will Smith", "Emma Watson", "Timothée Chalamet", "Zendaya",
+        "Gal Gadot", "Chris Evans", "Margot Robbie", "Ryan Reynolds", "Natalie Portman",
+        "Samuel L. Jackson", "Charlize Theron", "Hugh Jackman", "Amy Adams", "Daniel Radcliffe"
     ],
     "director": [
         "Steven Spielberg", "Christopher Nolan", "Martin Scorsese", "Quentin Tarantino", "James Cameron",
-        "Denis Villeneuve", "Greta Gerwig", "Bong Joon-ho", "Ridley Scott", "Peter Jackson"
+        "Denis Villeneuve", "Greta Gerwig", "Bong Joon-ho", "Ridley Scott", "Peter Jackson",
+        "Clint Eastwood", "Guillermo del Toro", "Sofia Coppola", "Wes Anderson", "David Fincher",
+        "Alfonso Cuarón", "Taika Waititi", "Jordan Peele", "Kathryn Bigelow", "Spike Lee",
+        "James Wan", "Ron Howard", "Ang Lee", "Sam Mendes", "Joel Coen"
     ],
     "author": [
         "J.K. Rowling", "Stephen King", "George R.R. Martin", "Dan Brown", "Haruki Murakami",
-        "Margaret Atwood", "Neil Gaiman", "Yuval Noah Harari", "Malcolm Gladwell", "James Clear"
+        "Margaret Atwood", "Neil Gaiman", "Yuval Noah Harari", "Malcolm Gladwell", "James Clear",
+        "Isabel Allende", "Chimamanda Ngozi Adichie", "Paulo Coelho", "John Grisham", "Sally Rooney",
+        "Colson Whitehead", "Brandon Sanderson", "V.E. Schwab", "Celeste Ng", "Tara Westover",
+        "Anthony Doerr", "Zadie Smith", "Khaled Hosseini", "Gillian Flynn", "Donna Tartt"
     ],
     "entrepreneur": [
         "Richard Branson", "Jack Ma", "Larry Ellison", "Michael Bloomberg", "Oprah Winfrey",
-        "Marc Benioff", "Reid Hoffman", "Peter Thiel", "Travis Kalanick", "Brian Chesky"
+        "Marc Benioff", "Reid Hoffman", "Peter Thiel", "Travis Kalanick", "Brian Chesky",
+        "Whitney Wolfe Herd", "Evan Spiegel", "Drew Houston", "Ben Silbermann", "Stewart Butterfield",
+        "Jessica Alba", "Sara Blakely", "Daymond John", "Kevin Systrom", "Jan Koum",
+        "Elizabeth Holmes", "Fred Smith", "Howard Schultz", "Indra Nooyi", "Sheryl Sandberg"
     ],
     "engineer": [
         "Linus Torvalds", "Guido van Rossum", "Brendan Eich", "James Gosling", "Dennis Ritchie",
-        "Ken Thompson", "Bjarne Stroustrup", "Anders Hejlsberg", "John Carmack", "Margaret Hamilton"
+        "Ken Thompson", "Bjarne Stroustrup", "Anders Hejlsberg", "John Carmack", "Margaret Hamilton",
+        "Radia Perlman", "Tim Sweeney", "Grace Hopper", "Ada Lovelace", "Hedy Lamarr",
+        "Vint Cerf", "Bob Kahn", "Steve Wozniak", "Donald Knuth", "Alan Turing",
+        "Claude Shannon", "John von Neumann", "Elon Musk", "Ginni Rometty", "Satya Nadella"
     ],
     "doctor": [
-        "Anthony Fauci", "Sanjay Gupta", "Oz Mehmet", "Ben Carson", "Atul Gawande"
+        "Anthony Fauci", "Sanjay Gupta", "Oz Mehmet", "Ben Carson", "Atul Gawande",
+        "Paul Farmer", "Leana Wen", "Vishal Rao", "Rochelle Walensky", "David Sinclair",
+        "Jennifer Doudna", "Emmanuelle Charpentier", "Katalin Karikó", "Siddhartha Mukherjee", "Peter Hotez",
+        "Harold Varmus", "Francis Collins", "Eric Topol", "Zubin Damania", "Gail Cassell",
+        "Susan Love", "Otis Brawley", "Robert Wachter", "Catherine DeAngelis", "Paul Offit"
     ],
     "journalist": [
-        "Anderson Cooper", "Christiane Amanpour", "Wolf Blitzer", "Rachel Maddow", "Tucker Carlson"
+        "Anderson Cooper", "Christiane Amanpour", "Wolf Blitzer", "Rachel Maddow", "Tucker Carlson",
+        "Lester Holt", "Gayle King", "Jake Tapper", "Don Lemon", "Martha Raddatz",
+        "Fareed Zakaria", "Megyn Kelly", "Chris Wallace", "Bret Baier", "Judy Woodruff",
+        "David Muir", "Norah O'Donnell", "Scott Pelley", "George Stephanopoulos", "Bill O'Reilly", "Charlie Rose",
+        "Katie Couric", "Tom Brokaw", "Diane Sawyer", "Barbara Walters", "Dan Rather"
     ],
     "chef": [
-        "Gordon Ramsay", "Jamie Oliver", "Anthony Bourdain", "Wolfgang Puck", "Massimo Bottura"
+        "Gordon Ramsay", "Jamie Oliver", "Anthony Bourdain", "Wolfgang Puck", "Massimo Bottura",
+        "Alice Waters", "Thomas Keller", "Emeril Lagasse", "Rachael Ray", "Bobby Flay",
+        "Ina Garten", "Nigella Lawson", "Heston Blumenthal", "David Chang", "José Andrés",
+        "Curtis Stone", "Giada De Laurentiis", "Alain Ducasse", "Marco Pierre White", "Paul Bocuse",
+        "Yotam Ottolenghi", "Grant Achatz", "Dominique Crenn", "Daniel Boulud", "Rick Bayless"
     ],
     
     # Organizations
-    "organisation": [
-        "United Nations", "World Health Organization", "Red Cross", "Amnesty International", "Greenpeace"
+    "organization": [
+        "United Nations", "World Health Organization", "Red Cross", "Amnesty International", "Greenpeace",
+        "Doctors Without Borders", "World Wildlife Fund", "UNICEF", "Oxfam", "Habitat for Humanity",
+        "Save the Children", "CARE International", "Human Rights Watch", "The Nature Conservancy", "Mercy Corps",
+        "International Rescue Committee", "Plan International", "Action Against Hunger", "Global Witness", "Transparency International",
+        "World Food Programme", "International Monetary Fund", "World Bank", "Interpol", "WTO"
     ],
     "company": [
         "Apple", "Microsoft", "Google", "Amazon", "Meta", "Tesla", "NVIDIA", "Intel", "AMD", "IBM",
-        "Oracle", "Salesforce", "Adobe", "Netflix", "Spotify", "Uber", "Airbnb", "Twitter", "LinkedIn"
+        "Oracle", "Salesforce", "Adobe", "Netflix", "Spotify", "Uber", "Airbnb", "Twitter", "LinkedIn",
+        "Snapchat", "Pinterest", "Dropbox", "Slack", "Zoom", "Shopify", "eBay", "PayPal", "Square", "Snap Inc.", "Reddit", "TikTok",
+        "ByteDance", "Huawei", "Samsung", "Sony", "LG", "Dell", "HP", "Cisco", "Qualcomm", "Siemens", "Accenture",
+        "SAP", "Infosys", "Tata Consultancy Services", "Capgemini", "Cognizant", "Wipro", "HCL Technologies"
     ],
     "startup": [
-        "OpenAI", "Anthropic", "Stripe", "Databricks", "Canva", "Figma", "Notion", "Airtable", "Vercel"
+        "OpenAI", "Anthropic", "Stripe", "Databricks", "Canva", "Figma", "Notion", "Airtable", "Vercel",
+        "Snowflake", "UiPath", "Robinhood", "Coinbase", "Palantir", "SpaceX", "Rivian", "Nuro", "Lime", "ChargePoint",
+        "Cameo", "Chime", "Brex", "Ginkgo Bioworks", "Impossible Foods", "Beyond Meat", "DoorDash", "Instacart", "Postmates",
+        "Coupang", "Grab", "Gojek", "Ola Cabs"
     ],
     "university": [
         "Harvard University", "Stanford University", "MIT", "Oxford University", "Cambridge University",
-        "Yale University", "Princeton University", "Columbia University", "UC Berkeley", "Caltech"
+        "Yale University", "Princeton University", "Columbia University", "UC Berkeley", "Caltech",
+        "University of Chicago", "UCLA", "University of Toronto", "ETH Zurich", "University of Tokyo",
+        "National University of Singapore", "Tsinghua University", "Peking University", "University of Melbourne", "University of Edinburgh",
+        "University of British Columbia", "University of Michigan", "Cornell University", "Duke University", "Johns Hopkins University"
     ],
     "sports_team": [
         "Los Angeles Lakers", "New York Yankees", "Real Madrid", "Barcelona FC", "Manchester United",
-        "Golden State Warriors", "Dallas Cowboys", "New England Patriots", "Chicago Bulls"
+        "Golden State Warriors", "Dallas Cowboys", "New England Patriots", "Chicago Bulls",
+        "Boston Red Sox", "Liverpool FC", "Bayern Munich", "Paris Saint-Germain", "Toronto Raptors", "Miami Heat",
+        "San Francisco 49ers", "Seattle Seahawks", "Cleveland Cavaliers", "Houston Rockets", "Arsenal FC",
+        "Juventus", "AC Milan", "Chelsea FC", "Manchester City", "Atletico Madrid",
     ],
     "bank": [
         "JPMorgan Chase", "Bank of America", "Goldman Sachs", "Morgan Stanley", "Citibank",
-        "Wells Fargo", "HSBC", "Deutsche Bank", "Credit Suisse", "Barclays"
+        "Wells Fargo", "HSBC", "Deutsche Bank", "Credit Suisse", "Barclays",
+        "UBS", "BNP Paribas", "Royal Bank of Canada", "TD Bank", "Santander",
+        "ING Group", "Societe Generale", "Mizuho Financial Group", "Sumitomo Mitsui Banking Corporation", "Commonwealth Bank",
+        "ANZ", "Westpac", "Scotiabank", "Rabobank", "Nordea"
     ],
     "airline": [
         "United Airlines", "Delta Airlines", "American Airlines", "Emirates", "Singapore Airlines",
-        "Lufthansa", "British Airways", "Qatar Airways", "Air France", "Southwest Airlines"
+        "Lufthansa", "British Airways", "Qatar Airways", "Air France", "Southwest Airlines",
+        "Cathay Pacific", "ANA", "KLM", "Turkish Airlines", "Etihad Airways",
+        "Qantas", "Air Canada", "Japan Airlines", "Iberia", "Alaska Airlines",
+        "Virgin Atlantic", "Aeroflot", "Saudia", "Ethiopian Airlines", "LATAM Airlines"
     ],
     "media_company": [
         "CNN", "BBC", "The New York Times", "The Washington Post", "Reuters",
-        "Bloomberg", "Fox News", "MSNBC", "The Guardian", "Wall Street Journal"
+        "Bloomberg", "Fox News", "MSNBC", "The Guardian", "Wall Street Journal",
+        "NBC News", "CBS News", "Al Jazeera", "The Economist", "Financial Times",
+        "Vox Media", "BuzzFeed", "HuffPost", "Vice Media", "The Atlantic", "Politico",
+        "Axios", "CNET", "TechCrunch", "Wired", "The Verge"
     ],
     "research_institute": [
         "NASA", "CERN", "NIH", "Max Planck Institute", "MIT Media Lab",
-        "DeepMind", "OpenAI Research", "Google Brain", "FAIR", "Microsoft Research"
+        "DeepMind", "OpenAI Research", "Google Brain", "FAIR", "Microsoft Research",
+        "Bell Labs", "Salk Institute", "Broad Institute", "Cold Spring Harbor Laboratory", "Tsinghua University Research Institute",  
+        "Fraunhofer Society", "Los Alamos National Laboratory", "Lawrence Berkeley National Laboratory", "Argonne National Laboratory", "Oak Ridge National Laboratory",
+        "Riken Institute", "Karolinska Institute", "Weizmann Institute of Science", "Institute Pasteur", "Johns Hopkins Applied Physics Laboratory"
     ],
     "hospital": [
-        "Mayo Clinic", "Cleveland Clinic", "Johns Hopkins Hospital", "Massachusetts General Hospital"
+        "Mayo Clinic", "Cleveland Clinic", "Johns Hopkins Hospital", "Massachusetts General Hospital",
+        "UCLA Medical Center", "Mount Sinai Hospital", "Toronto General Hospital", "Charité – Universitätsmedizin Berlin",
+        "Singapore General Hospital", "Royal Melbourne Hospital", "Karolinska University Hospital", "St Thomas' Hospital",
+        "Cedars-Sinai Medical Center", "NYU Langone Health", "Houston Methodist Hospital",
+        "Duke University Hospital", "Vancouver General Hospital", "Sheba Medical Center", "Apollo Hospitals", "Asan Medical Center"
     ],
     "manufacturer": [
-        "Samsung Electronics", "Foxconn", "TSMC", "Qualcomm", "Broadcom", "Texas Instruments"
+        "Samsung Electronics", "Foxconn", "TSMC", "Qualcomm", "Broadcom", "Texas Instruments",
+        "Sony Corporation", "LG Electronics", "Panasonic", "Hitachi", "Siemens", "GE Appliances", "Whirlpool",
+        "Bosch", "Mitsubishi Electric", "Sharp Corporation", "Toshiba", "Lenovo", "Acer", "ASUS", "Dell Technologies",
+        "HP Inc.", "Fujitsu", "Canon Inc.", "Nikon Corporation", "GoPro", "DJI", "Garmin", "Fitbit", "Sonos", "JBL",
+        "Bose", "Yamaha", "Sennheiser", "Harman Kardon", "Vizio", "ZTE", "Oppo", "Vivo", "OnePlus"
     ],
     "retailer": [
-        "Walmart", "Amazon", "Costco", "Target", "Home Depot", "Best Buy", "IKEA"
+        "Walmart", "Amazon", "Costco", "Target", "Home Depot", "Best Buy", "IKEA",
+        "Lowe's", "Kroger", "Aldi", "Tesco", "Carrefour", "Metro AG", "JD.com", "Alibaba",
+        "eBay", "Rakuten", "Flipkart", "Macy's", "Nordstrom", "Sears", "Dillard's", "Kohl's", "Wayfair", "Zara", "H&M",
+        "Uniqlo", "Gap Inc.", "Old Navy", "Forever 21", "Urban Outfitters", "ASOS"
     ],
     
     # Locations
     "location": [
-        "Silicon Valley", "Wall Street", "Hollywood", "Times Square", "Central Park"
+        "Silicon Valley", "Wall Street", "Hollywood", "Times Square", "Central Park",
+        "Golden Gate Bridge", "Grand Canyon", "Mount Everest", "Sahara Desert", "Great Barrier Reef",
+        "Niagara Falls", "Yellowstone National Park", "Yosemite National Park", "Statue of Liberty", "Mount Fuji",
+        "Eiffel Tower", "Colosseum", "Big Ben", "Sydney Opera House", "Christ the Redeemer",
+        "Pyramids of Giza", "Machu Picchu", "Angkor Wat", "Stonehenge", "Petra",
+        "Mount Kilimanjaro", "Galápagos Islands", "Serengeti National Park", "Banff National Park", "Lake Tahoe"
     ],
     "city": [
         "San Francisco", "New York", "Los Angeles", "Seattle", "Boston", "Chicago", "Austin",
         "London", "Paris", "Tokyo", "Singapore", "Hong Kong", "Shanghai", "Beijing", "Seoul",
-        "Sydney", "Toronto", "Berlin", "Amsterdam", "Dubai", "Mumbai", "Bangalore"
+        "Sydney", "Toronto", "Berlin", "Amsterdam", "Dubai", "Mumbai", "Bangalore",
+        "Mexico City", "São Paulo", "Buenos Aires", "Cape Town", "Cairo", "Moscow",
+        "Istanbul", "Rome", "Madrid", "Lisbon", "Vienna", "Prague", "Dublin", "Edinburgh", "Vancouver", "Melbourne"
     ],
     "country": [
         "United States", "China", "Japan", "Germany", "United Kingdom", "France", "India",
-        "Canada", "Australia", "South Korea", "Brazil", "Italy", "Spain", "Russia"
+        "Canada", "Australia", "South Korea", "Brazil", "Italy", "Spain", "Russia",
+        "Mexico", "Indonesia", "Netherlands", "Saudi Arabia", "Turkey", "Switzerland",
+        "Sweden", "Norway", "Argentina", "South Africa", "Egypt", "Thailand", "Vietnam", "Philippines", "New Zealand", "Poland",
+        "Belgium", "Austria", "Denmark", "Finland", "Ireland", "Greece", "Czech Republic", "Hungary",
+        "Portugal", "Chile", "Colombia", "Peru", "Ukraine", "Romania", "Slovakia", "Bulgaria",
+        "Croatia", "Slovenia", "Luxembourg", "Iceland", "Estonia", "Latvia", "Lithuania", "Malta"
     ],
     "state": [
-        "California", "Texas", "New York", "Florida", "Washington", "Massachusetts", "Colorado"
+        "California", "Texas", "New York", "Florida", "Washington", "Massachusetts", "Colorado",
+        "Illinois", "Ohio", "Pennsylvania", "Virginia", "Michigan", "New Jersey", "North Carolina",
+        "Georgia", "Tennessee", "Arizona", "Oregon", "Minnesota", "Wisconsin", "Indiana",
+        "South Carolina", "Alabama", "Kentucky", "Louisiana", "Mississippi", "Iowa", "Nebraska", "Kansas",
+        "Oklahoma", "Arkansas", "Utah", "Nevada", "New Mexico", "Hawaii", "Maine", "Vermont", "New Hampshire", "Rhode Island", "Delaware",
+        "West Virginia", "Montana", "Idaho", "Wyoming", "North Dakota", "South Dakota", "Alaska"
     ],
     "building": [
-        "Empire State Building", "Burj Khalifa", "One World Trade Center", "Taipei 101"
+        "Empire State Building", "Burj Khalifa", "One World Trade Center", "Taipei 101",
+        "Shanghai Tower", "Petronas Towers", "Willis Tower", "The Shard", "CN Tower", "Lotte World Tower",
+        "Marina Bay Sands", "Jin Mao Tower", "International Commerce Centre", "Kingdom Centre", "Abraj Al Bait",
+        "Canton Tower", "Federation Tower", "432 Park Avenue", "30 St Mary Axe", "Bank of America Tower", "Comcast Center",
+        "John Hancock Center", "Chrysler Building", "Flatiron Building", "Walt Disney Concert Hall", "Transamerica Pyramid",
+        "Gherkin", "Walkie Talkie", "Leadenhall Building", "Petronas Twin Towers", "U.S. Bank Tower",
+        "Aon Center", "Citigroup Center", "Trump Tower", "MetLife Building", "Time Warner Center"
     ],
     "landmark": [
-        "Eiffel Tower", "Statue of Liberty", "Great Wall of China", "Taj Mahal", "Colosseum"
+        "Eiffel Tower", "Statue of Liberty", "Great Wall of China", "Taj Mahal", "Colosseum",
+        "Machu Picchu", "Christ the Redeemer", "Big Ben", "Sydney Opera House", "Pyramids of Giza",
+        "Stonehenge", "Angkor Wat", "Mount Rushmore", "Golden Gate Bridge", "Acropolis of Athens",
+        "Sagrada Familia", "Neuschwanstein Castle", "Brandenburg Gate", "Petra", "Alhambra",
+        "Louvre Museum", "Buckingham Palace", "Notre-Dame Cathedral", "Hagia Sophia", "Leaning Tower of Pisa",
+        "Versailles Palace", "Mont Saint-Michel", "Chichen Itza", "Moai Statues of Easter Island", "Burj Khalifa",
+        "CN Tower", "Kremlin", "Red Square", "Forbidden City", "Potala Palace", "Palace of Westminster",
+        "St. Peter's Basilica", "Uffizi Gallery", "Rijksmuseum", "Hermitage Museum"
     ],
     "stadium": [
-        "Madison Square Garden", "Wembley Stadium", "Camp Nou", "Yankee Stadium"
+        "Madison Square Garden", "Wembley Stadium", "Camp Nou", "Yankee Stadium",
+        "Old Trafford", "Allianz Arena", "San Siro", "Maracanã Stadium", "Rose Bowl", "Tokyo Dome",
+        "Mercedes-Benz Stadium", "AT&T Stadium", "Anfield", "Stamford Bridge", "Celtic Park",
+        "Signal Iduna Park", "Santiago Bernabéu Stadium", "Estadio Azteca", "FNB Stadium", 
+        "Gelsenkirchen Stadium", "Emirates Stadium"
     ],
     
     # Products & Technology
     "product": [
-        "iPhone", "MacBook", "iPad", "Apple Watch", "AirPods", "Tesla Model S", "PlayStation 5"
+        "iPhone", "MacBook", "iPad", "Apple Watch", "AirPods", "Tesla Model S", "PlayStation 5",
+        "Xbox Series X", "Nintendo Switch", "Samsung Galaxy S23", "Google Pixel 7", "Dell XPS 13",
+        "HP Spectre x360", "Sony WH-1000XM5", "Bose QuietComfort 45", "Kindle Paperwhite",
+        "GoPro HERO10", "Fitbit Charge 5", "DJI Mavic Air 2", "Ring Video Doorbell",
+        "Nest Thermostat", "Roku Streaming Stick+", "Chromecast with Google TV", "Apple TV 4K", "Amazon Echo Dot",
+        "Google Nest Hub", "Samsung QLED TV", "LG OLED TV", "Sonos One", "NVIDIA GeForce RTX 4090",
+        "AMD Radeon RX 7900 XTX", "Intel Core i9-13900K", "Corsair Vengeance RAM", "Samsung 980 Pro SSD"
     ],
     "software": [
-        "Windows", "macOS", "Microsoft Office", "Adobe Photoshop", "Slack", "Zoom", "Notion"
+        "Windows", "macOS", "Microsoft Office", "Adobe Photoshop", "Slack", "Zoom", "Notion",
+        "Trello", "Asana", "Visual Studio Code", "IntelliJ IDEA", "PyCharm", "Eclipse", "GitHub Desktop",
+        "Docker", "Kubernetes", "Jira", "Confluence", "Figma", "Sketch", "Final Cut Pro", "Logic Pro",
+        "Ableton Live", "Pro Tools", "Blender", "AutoCAD", "MATLAB", "SPSS", "Tableau",
+        "Power BI", "Salesforce CRM", "SAP ERP", "QuickBooks", "Xero", "WordPress", "Drupal",
+        "Joomla", "Magento", "Shopify","Wix", "Squarespace"
     ],
     "app": [
-        "Instagram", "TikTok", "WhatsApp", "Snapchat", "Uber", "Spotify", "Netflix"
+        "Instagram", "TikTok", "WhatsApp", "Snapchat", "Uber", "Spotify", "Netflix",
+        "YouTube", "Facebook", "Twitter", "Reddit", "Pinterest", "LinkedIn", "Discord",
+        "Telegram", "Signal", "Zoom", "Google Maps", "Waze", "Dropbox", "Evernote",
+        "Duolingo", "Headspace", "Calm", "Strava", "Fitbit", "MyFitnessPal",
+        "Venmo", "Cash App", "Robinhood", "Coinbase", "Airbnb", "DoorDash",
+        "Grubhub", "Postmates", "Yelp", "TripAdvisor", "Hulu", "Disney+"
     ],
     "game": [
         "Minecraft", "Fortnite", "League of Legends", "Call of Duty", "Grand Theft Auto V",
-        "The Legend of Zelda", "Super Mario", "Pokemon", "FIFA", "Elden Ring"
+        "The Legend of Zelda", "Super Mario", "Pokemon", "FIFA", "Elden Ring",
+        "Overwatch", "Apex Legends", "Valorant", "Among Us", "Roblox", "Animal Crossing", "Cyberpunk 2077",
+        "The Witcher 3", "God of War", "Halo Infinite", "Assassin's Creed Valhalla", "Dota 2", "Counter-Strike: Global Offensive", "Rocket League", "Fall Guys", "Genshin Impact",
+        "Hades", "Stardew Valley", "Dead by Daylight", "Terraria", "Subnautica", "Dark Souls III"
     ],
     "movie": [
         "Avatar", "Titanic", "Avengers: Endgame", "The Dark Knight", "Inception",
-        "Interstellar", "The Matrix", "Star Wars", "Jurassic Park", "The Godfather"
+        "Interstellar", "The Matrix", "Star Wars", "Jurassic Park", "The Godfather",
+        "Pulp Fiction", "Forrest Gump", "The Shawshank Redemption", "Gladiator", "The Lion King",
+        "Frozen", "Toy Story", "Finding Nemo", "The Avengers", "Black Panther",
+        "Spider Man", "Iron Man", "Captain America", "Thor", "Hulk"
     ],
     "book": [
         "Harry Potter", "The Lord of the Rings", "A Song of Ice and Fire", "The Da Vinci Code",
-        "Sapiens", "Atomic Habits", "The Lean Startup", "Zero to One"
+        "Sapiens", "Atomic Habits", "The Lean Startup", "Zero to One",
+        "Thinking, Fast and Slow", "The Subtle Art of Not Giving a F*ck", "Educated", "Becoming",
+        "The Alchemist", "1984", "To Kill a Mockingbird", "The Great Gatsby", "Moby Dick",
+        "War and Peace", "Pride and Prejudice", "The Catcher in the Rye", "The Hobbit"
     ],
     "music_album": [
         "Thriller", "The Dark Side of the Moon", "Abbey Road", "Back in Black",
-        "1989", "25", "Divide", "Scorpion"
+        "1989", "25", "Divide", "Scorpion", "Lemonade", "Future Nostalgia",
+        "When We All Fall Asleep, Where Do We Go?", "Fine Line", "Justice",
+        "Blonde", "DAMN.", "To Pimp a Butterfly", "Channel Orange", "1984", "Purple Rain", "Born in the U.S.A.",
+        "Rumours", "Hotel California", "Led Zeppelin IV", "Sgt. Pepper's Lonely Hearts Club Band", "Appetite for Destruction",
+        "Nevermind", "OK Computer", "The Wall", "A Night at the Opera", "The Joshua Tree"
     ],
     "programlang": [
-        "Python", "JavaScript", "TypeScript", "Java", "C++", "C#", "Go", "Rust", "Swift", "Kotlin"
+        "Python", "JavaScript", "TypeScript", "Java", "C++", "C#", "Go", "Rust", "Swift", "Kotlin",
+        "Ruby", "PHP", "HTML", "CSS", "SQL", "R", "MATLAB", "Perl", "Lua", "Dart", "Scala",
+        "Haskell", "Elixir", "Clojure", "Objective-C", "Shell Scripting",
+        "PowerShell", "Visual Basic", "Fortran", "COBOL", "Assembly Language",
+        "Groovy", "F#", "Erlang", "Julia", "Ada", "Prolog", "Scheme", "Lisp"
     ],
     "framework": [
-        "React", "Angular", "Vue.js", "Django", "Flask", "Spring", "TensorFlow", "PyTorch"
+        "React", "Angular", "Vue.js", "Django", "Flask", "Spring", "TensorFlow", "PyTorch",
+        "Ruby on Rails", "Laravel", "ASP.NET", "Express.js", "Next.js", "Nuxt.js",
+        "Svelte", "Ember.js", "Bootstrap", "Tailwind CSS", "jQuery", "Redux",
+        "Keras", "Hadoop", "Spark", "Cordova", "Ionic", "Xamarin", "Flutter",
+        "Electron", "Gatsby", "GraphQL", "Apollo Client", "NestJS", "FastAPI"
     ],
     "database": [
-        "MySQL", "PostgreSQL", "MongoDB", "Redis", "Elasticsearch", "Oracle Database"
+        "MySQL", "PostgreSQL", "MongoDB", "Redis", "Elasticsearch", "Oracle Database",
+        "Microsoft SQL Server", "SQLite", "Cassandra", "Firebase", "DynamoDB", "MariaDB",
+        "CouchDB", "Neo4j", "InfluxDB", "TimescaleDB", "HBase", "RethinkDB", "CockroachDB", "Memcached",
+        "Amazon Aurora", "Google BigQuery", "Snowflake", "IBM Db2", "Teradata",
+        "Amazon Redshift", "Google Cloud Spanner", "Azure Cosmos DB"
     ],
     "ai_model": [
-        "GPT-4", "ChatGPT", "Claude", "Gemini", "LLaMA", "DALL-E", "Midjourney", "Stable Diffusion"
+        "GPT-4", "ChatGPT", "Claude", "Gemini", "LLaMA", "DALL-E", "Midjourney", "Stable Diffusion",
+        "BERT", "RoBERTa", "T5", "Whisper", "PaLM", "ERNIE", "XLNet", "ELECTRA", "GPT-3", "Codex",
+        "DINO", "CLIP", "VGG16", "ResNet50", "YOLOv5", "U-Net", "CycleGAN", "DeepLab", "Fast R-CNN",
+        "Mask R-CNN", "Transformer", "AlexNet", "InceptionV3", "MobileNet", "EfficientNet", "Swin Transformer",
+        "DeBERTa", "ALBERT", "DistilBERT", "Turing-NLG", "ERNIE-GEN", "GShard"
     ],
     "os": [
-        "Windows 11", "macOS Sonoma", "Linux", "Ubuntu", "Android", "iOS"
+        "Windows 11", "macOS Sonoma", "Linux", "Ubuntu", "Android", "iOS",
+        "Fedora", "Debian", "Red Hat Enterprise Linux", "CentOS", "Arch Linux", "Kali Linux",
+        "Chrome OS", "FreeBSD", "OpenBSD", "Solaris", "Gentoo Linux", "Manjaro", "Zorin OS", "Pop!_OS"
     ],
     "cryptocurrency": [
-        "Bitcoin", "Ethereum", "Solana", "Cardano", "Dogecoin", "XRP"
+        "Bitcoin", "Ethereum", "Solana", "Cardano", "Dogecoin", "XRP",
+        "Polkadot", "Litecoin", "Chainlink", "Uniswap", "Avalanche", "Terra", "Algorand",
+        "Cosmos", "VeChain", "Filecoin", "Stellar", "Tezos", "Aave", "Compound", "SushiSwap",
+        "PancakeSwap", "Theta", "Zcash", "Dash", "Monero", "EOS", "Tron", "Neo", "Maker", "Yearn.finance",
+        "Curve DAO", "Balancer", "Ren", "0x", "Basic Attention Token"
     ],
     
     # Events & Awards
     "event": [
-        "CES", "WWDC", "Google I/O", "AWS re:Invent", "Mobile World Congress"
+        "CES", "WWDC", "Google I/O", "AWS re:Invent", "Mobile World Congress",
+        "E3 Expo", "Comic-Con", "SXSW", "IFA Berlin", "Dreamforce", "VivaTech", "TechCrunch Disrupt", "Slush", "Web Summit", "Collision Conference",
+        "RSA Conference", "Black Hat Conference", "DEF CON", "GDC", "PAX", "BlizzCon",
+        "Gamescom", "Tokyo Game Show", "Paris Fashion Week", "New York Fashion Week",
+        "London Fashion Week", "Milan Fashion Week", "Berlin Fashion Week", "Cannes Film Festival", "Sundance Film Festival",
+        "Venice Film Festival", "Toronto International Film Festival", "Berlin International Film Festival", "Tribeca Film Festival",
+        "SXSW Film Festival", "Annecy International Animated Film Festival", "Telluride Film Festival", "Locarno Film Festival"
     ],
     "conference": [
-        "TED", "Davos Forum", "NeurIPS", "ICML", "CVPR", "ACL"
+        "TED", "Davos Forum", "NeurIPS", "ICML", "CVPR", "ACL",
+        "EMNLP", "ICLR", "AAAI", "KDD", "SIGGRAPH", "CHI", "WWW Conference", "ISWC", "UAI",
+        "ICRA", "IROS", "RSS", "ECCV", "ICCV", "NAACL", "COLING",
+        "WSDM", "CIKM", "ICDE", "VLDB", "SIGMOD"
     ],
     "competition": [
-        "Olympics", "World Cup", "Super Bowl", "Wimbledon", "Tour de France"
+        "Olympics", "World Cup", "Super Bowl", "Wimbledon", "Tour de France",
+        "FIFA World Cup", "UEFA Champions League", "NBA Finals", "Stanley Cup", "Cricket World Cup",
+        "Rugby World Cup", "Ashes Series", "Copa America", "Indian Premier League", "La Liga",
+        "Serie A", "Bundesliga", "Ligue 1", "MLS Cup", "FA Cup",
+        "CFL Grey Cup", "NHL Winter Classic", "All England Open Badminton Championships", "World Snooker Championship", "PGA Championship"
     ],
     "award": [
         "Nobel Prize", "Academy Award", "Grammy Award", "Emmy Award", "Pulitzer Prize",
-        "Turing Award", "Fields Medal", "Golden Globe", "BAFTA"
+        "Turing Award", "Fields Medal", "Golden Globe", "BAFTA",
+        "Cannes Palme d'Or", "Tony Award", "Booker Prize", "National Medal of Technology and Innovation", "Lasker Award",
+        "Pritzker Architecture Prize", "Right Livelihood Award", "Wolf Prize", "Sakharov Prize", "Ig Nobel Prize",
+        "Hugo Award", "Nebula Award", "Saturn Award", "Critics' Choice Award", "Directors Guild of America Award"
     ],
     "tv_show": [
-        "Game of Thrones", "Breaking Bad", "Stranger Things", "The Office", "Friends"
+        "Game of Thrones", "Breaking Bad", "Stranger Things", "The Office", "Friends",
+        "The Mandalorian", "The Crown", "Westworld", "The Witcher", "Black Mirror",
+        "The Simpsons", "Rick and Morty", "The Big Bang Theory", "Sherlock", "House of Cards",
+        "Narcos", "Ozark", "Better Call Saul", "Fargo", "True Detective", "Mindhunter",
+        "Chernobyl", "The Handmaid's Tale", "Peaky Blinders", "Succession", "The Boys"
     ],
     
     # Time
-    "date": ["2024", "2023", "2022", "2021", "2020", "2019", "2010", "2000", "1990", "1980"],
-    "year": ["2024", "2023", "2022", "2021", "2020"],
-    "month": ["January", "February", "March", "April", "May", "June"],
-    "century": ["21st century", "20th century", "19th century"],
+    "date": ["January 1, 2024", "December 25, 2023", "July 4, 2022", "November 11, 2021", "October 31, 2020","March 15, 2023",],
+    "year": ["2024", "2023", "2022", "2021", "2020", "2019", "2018", "2017", "2016", "2015"],
+    "month": ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"],
+    "century": ["21st century", "20th century", "19th century", "18th century", "17th century", "16th century", "15th century", "14th century", "13th century", "12th century"],
 
 
     # === FINANCIAL & NUMERIC ===
     "money": [
         "1 billion dollars", "$44 billion", "100 million euros", "£500,000", 
-        "10.5 billion USD", "50 million THB", "net worth of $200B"
+        "10.5 billion USD", "50 million THB", "net worth of $200B",
+        "raised $300M in funding", "valued at €2.3B", "acquired for $1.2 billion",
+        "market cap of £1 trillion", "annual revenue of $150 million",
+        "profit of ¥5 billion", "investment of ₹750 million",
+        "funding round of $25 million", "IPO valued at $3 billion",
+        
     ],
     "percent": [
-        "15%", "51 percent", "0.5%", "99.9%", "a quarter", "ten percent"
+        "15%", "51 percent", "0.5%", "99.9%", "a quarter", "ten percent",
+        "half", "three quarters", "eighty percent", "sixty five percent",
+        "twelve point five percent", "ninety nine percent", "four percent",
+        "seventy two percent", "eleven percent", "forty four percent",
+        "sixty percent", "thirty three percent", "eighty five percent",
+        "fifty percent",
     ],
     "stock_symbol": [
-        "TSLA", "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "NFLX"
+        "TSLA", "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "NFLX",
+        "INTC", "AMD", "ORCL", "CSCO", "IBM", "ADBE", "CRM", "PYPL", "UBER",
+        "LYFT", "SQ", "SHOP", "TWTR", "SNAP", "ZM", "DOCU", "ROKU", "SPOT",
+        "BIDU", "JD", "BABA", "TCEHY", "PDD", "NTES", "WB", "DIS", "V", "MA", "JPM", "BAC",
+        "WFC", "C", "GS", "MS", "AXP", "USB", "TD", "RY", "BNS", "HSBC",
+        "DB", "CS", "BARC", "RBS", "BNP", "ING", "SAN", "BBVA", "ITUB"
     ],
 
     # === DIGITAL & INFRASTRUCTURE ===
     "url": [
         "https://www.openai.com", "www.google.com", "github.com/trending", 
-        "apple.co/support", "https://t.co/xyz123"
+        "apple.co/support", "https://t.co/xyz123",
+        "linkedin.com/in/johndoe", "https://news.ycombinator.com", "medium.com/@username", 
+        "https://stackoverflow.com/questions", "bit.ly/3xyzabc","www.reddit.com/r/programming"
     ],
     "email": [
         "contact@tesla.com", "support@apple.com", "ceo@microsoft.com", 
-        "info@un.org", "admin@stanford.edu"
+        "info@un.org", "admin@stanford.edu",
+        "help@openai.com", "info@github.com", "contact@reddit.com", "support@linkedin.com",
+        "service@twitter.com", "contact@facebook.com"
     ],
     "phone_number": [
-        "+1-555-0199", "02-123-4567", "+44 20 7946 0958", "1-800-APPLE"
+        "+1-555-0199", "02-123-4567", "+44 20 7946 0958", "1-800-APPLE",
+        "+81-3-1234-5678", "+91-98765-43210", "03-4567-8901", "+61-2-9876-5432",
+        "+49-30-123456", "+33-1-2345-6789", "+86-10-1234-5678", "+7-495-123-4567",
+        "+34-91-123-4567", "+39-06-1234-5678", "+55-11-91234-5678",
+        "+27-11-123-4567", "+82-2-1234-5678", "+65-6123-4567", "+64-9-123-4567", "+48-22-123-4567",
+        "+46-8-123-4567", "+31-20-123-4567", "+41-44-123-4567", "+352-26-123-456",
+        "+353-1-123-4567", "+420-2-1234-5678", "+386-1-123-4567", "+421-2-1234-5678",
+        "+30-21-1234-5678"
     ],
 
     # === LEGAL & MEDICAL ===
     "legal_document": [
         "GDPR", "Section 301", "Article 50", "The Constitution", 
-        "Patent Act", "Digital Millennium Copyright Act"
+        "Patent Act", "Digital Millennium Copyright Act",
+        "Freedom of Information Act", "Health Insurance Portability and Accountability Act",
+        "Sarbanes-Oxley Act", "Dodd-Frank Act", "Consumer Protection Act",
+        "Civil Rights Act", "Clean Air Act", "Affordable Care Act", "Patriot Act",
+        "Foreign Corrupt Practices Act", "Family Educational Rights and Privacy Act",
+        "Fair Labor Standards Act", "Truth in Lending Act", "Electronic Communications Privacy Act",
+
     ],
     "disease": [
-        "COVID-19", "Diabetes", "Alzheimer's", "Influenza", "Hypertension", "Cancer"
+        "COVID-19", "Diabetes", "Alzheimer's", "Influenza", "Hypertension", "Cancer",
+        "Asthma", "Arthritis", "Depression", "HIV/AIDS", "Tuberculosis", "Malaria",
+        "Ebola", "Zika virus", "Dengue fever", "Cholera", "Measles", "Mumps", "Rubella",
+        "Hepatitis B", "Hepatitis C", "Cystic fibrosis", "Parkinson's disease", "Multiple sclerosis",
+        "Lupus", "Crohn's disease", "Ulcerative colitis", "Psoriasis", "Anemia", "Osteoporosis",
+        "Glaucoma", "Cataracts", "Migraine", "Epilepsy", "Schizophrenia", "Bipolar disorder",
+        "Obsessive-compulsive disorder", "Post-traumatic stress disorder", "Autism spectrum disorder",
+        "Attention deficit hyperactivity disorder"
     ],
     "medicine": [
-        "Paracetamol", "Insulin", "Pfizer vaccine", "Aspirin", "Ibuprofen"
+        "Paracetamol", "Insulin", "Pfizer vaccine", "Aspirin", "Ibuprofen",
+        "Amoxicillin", "Metformin", "Atorvastatin", "Omeprazole", "Lisinopril",
+        "Levothyroxine", "Albuterol", "Simvastatin", "Losartan", "Gabapentin",
+        "Hydrochlorothiazide", "Sertraline", "Furosemide", "Zolpidem", "Prednisone",
+        "Citalopram", "Montelukast", "Tramadol", "Clopidogrel", "Tamsulosin", "Fluoxetine",
+        "Warfarin", "Rosuvastatin", "Duloxetine", "Ranitidine", "Pantoprazole",
+        "Cyclobenzaprine", "Meloxicam", "Allopurinol", "Bupropion", "Carvedilol"
+    ],
+    "animal": [
+        "Lion", "Tiger", "Elephant", "Dog", "Cat", "Eagle", "Shark", "Whale", "Penguin", "Panda",
+        "Bear", "Wolf", "Dolphin", "Cheetah", "Giraffe", "Zebra", "Kangaroo", "Koala", "Gorilla"
+    ],
+    "plant": [
+        "Rose", "Oak Tree", "Cactus", "Sunflower", "Bamboo", "Pine", "Tulip", "Orchid", "Maple", "Fern",
+        "Lotus", "Cherry Blossom", "Aloe Vera", "Lavender", "Jasmine"
+    ],
+    "instrument": [
+        "Guitar", "Piano", "Violin", "Drums", "Flute", "Saxophone", "Trumpet", "Cello", "Harp", "Clarinet",
+        "Trombone", "Harmonica", "Ukulele", "Accordion", "Keyboard"
+    ],
+    
+    # ==========================================================================
+    # 🔥 CROSS-RE SPECIFIC ENTITIES (For Zero-Shot Generalization)
+    # Labels not in v7 dataset but present in Cross-RE
+    # ==========================================================================
+    "politicalparty": [
+        "Democratic Party", "Republican Party", "Labour Party", "Conservative Party",
+        "Liberal Democrats", "Green Party", "Communist Party", "Socialist Party",
+        "Libertarian Party", "Independence Party", "Nationalist Party", "Progressive Party",
+        "People's Party", "Reform Party", "Freedom Party", "Workers' Party",
+        "Social Democratic Party", "Christian Democratic Party", "Pirate Party",
+        "En Marche!", "Five Star Movement", "Alternative for Germany", "Podemos",
+        "Syriza", "Fidesz", "Law and Justice", "Bharatiya Janata Party", "Indian National Congress"
+    ],
+    "election": [
+        "2024 US Presidential Election", "2020 General Election", "Brexit Referendum",
+        "2022 Midterm Elections", "French Presidential Election 2022", "German Federal Election 2021",
+        "California Gubernatorial Election", "UK General Election 2019", "Indian General Election 2024",
+        "European Parliament Elections", "Brazilian Presidential Election 2022",
+        "Australian Federal Election 2022", "Japanese House of Councillors Election",
+        "Canadian Federal Election 2021", "South Korean Presidential Election 2022"
+    ],
+    "band": [
+        "The Beatles", "Led Zeppelin", "Pink Floyd", "The Rolling Stones", "Queen",
+        "Nirvana", "Metallica", "U2", "Coldplay", "Radiohead", "Foo Fighters",
+        "Red Hot Chili Peppers", "Guns N' Roses", "AC/DC", "Green Day", "Oasis",
+        "The Who", "Fleetwood Mac", "The Beach Boys", "R.E.M.", "Bon Jovi",
+        "Depeche Mode", "New Order", "The Cure", "Iron Maiden", "Black Sabbath",
+        "BTS", "BLACKPINK", "EXO", "TWICE", "Stray Kids", "NCT"
+    ],
+    "musicalartist": [
+        "Michael Jackson", "Prince", "Madonna", "David Bowie", "Elton John",
+        "Whitney Houston", "Mariah Carey", "Celine Dion", "Adele", "Ed Sheeran",
+        "The Weeknd", "Taylor Swift", "Beyoncé", "Drake", "Kendrick Lamar",
+        "Frank Ocean", "Billie Eilish", "Post Malone", "Dua Lipa", "Harry Styles",
+        "Bad Bunny", "J Balvin", "Shakira", "Daddy Yankee", "Rosalía",
+        "RM", "V", "Jungkook", "Lisa", "Jennie"
+    ],
+    "album": [
+        "Thriller", "Abbey Road", "The Dark Side of the Moon", "Rumours", "Back in Black",
+        "Hotel California", "Led Zeppelin IV", "Appetite for Destruction", "Nevermind", "OK Computer",
+        "Kind of Blue", "The Wall", "Born to Run", "Purple Rain", "Blonde on Blonde",
+        "1989", "Lemonade", "To Pimp a Butterfly", "My Beautiful Dark Twisted Fantasy", "Reputation",
+        "MAP OF THE SOUL: 7", "Love Yourself: Tear", "Born Pink", "Midnights", "Renaissance"
+    ],
+    "song": [
+        "Bohemian Rhapsody", "Imagine", "Hey Jude", "Smells Like Teen Spirit", "Stairway to Heaven",
+        "Like a Rolling Stone", "Yesterday", "What's Going On", "Respect", "Good Vibrations",
+        "Johnny B. Goode", "Superstition", "Billie Jean", "Purple Haze", "Light My Fire",
+        "Shape of You", "Blinding Lights", "Rolling in the Deep", "Uptown Funk", "Despacito",
+        "Gangnam Style", "Dynamite", "Butter", "How You Like That", "Kill Bill"
+    ],
+    "musicgenre": [
+        "Rock", "Pop", "Hip Hop", "R&B", "Jazz", "Classical", "Electronic", "Country",
+        "Blues", "Reggae", "Metal", "Punk", "Soul", "Funk", "Folk", "Disco",
+        "Techno", "House", "Dubstep", "Trap", "K-Pop", "J-Pop", "Latin Pop",
+        "Indie Rock", "Alternative", "Grunge", "Post-Rock", "Progressive Rock"
+    ],
+    "musicalinstrument": [
+        "Electric Guitar", "Acoustic Guitar", "Bass Guitar", "Grand Piano", "Synthesizer",
+        "Drum Kit", "Violin", "Cello", "Saxophone", "Trumpet", "Flute",
+        "Harmonica", "Banjo", "Mandolin", "Trombone", "French Horn",
+        "Clarinet", "Oboe", "Harp", "Marimba", "Vibraphone"
+    ],
+    "writer": [
+        "William Shakespeare", "Jane Austen", "Charles Dickens", "Ernest Hemingway",
+        "F. Scott Fitzgerald", "Mark Twain", "Virginia Woolf", "James Joyce",
+        "George Orwell", "Franz Kafka", "Leo Tolstoy", "Fyodor Dostoevsky",
+        "Gabriel García Márquez", "Toni Morrison", "Salman Rushdie", "Kazuo Ishiguro",
+        "Haruki Murakami", "J.K. Rowling", "Stephen King", "George R.R. Martin"
+    ],
+    "poem": [
+        "The Waste Land", "The Raven", "Howl", "Paradise Lost", "The Divine Comedy",
+        "Leaves of Grass", "The Canterbury Tales", "Beowulf", "Odyssey", "Iliad",
+        "Sonnet 18", "Ode to a Nightingale", "The Love Song of J. Alfred Prufrock",
+        "Do Not Go Gentle into That Good Night", "Still I Rise", "The Road Not Taken"
+    ],
+    "literarygenre": [
+        "Science Fiction", "Fantasy", "Mystery", "Thriller", "Romance",
+        "Horror", "Historical Fiction", "Literary Fiction", "Young Adult",
+        "Crime Fiction", "Dystopian", "Magical Realism", "Gothic Fiction",
+        "Satire", "Tragedy", "Epic Poetry", "Memoir", "Biography"
+    ],
+    "academicjournal": [
+        "Nature", "Science", "Cell", "The Lancet", "New England Journal of Medicine",
+        "IEEE Transactions on Pattern Analysis and Machine Intelligence",
+        "Journal of Machine Learning Research", "ACM Computing Surveys",
+        "Physical Review Letters", "Chemical Reviews", "Proceedings of the National Academy of Sciences",
+        "Journal of the American Chemical Society", "Angewandte Chemie", "Advanced Materials"
+    ],
+    "researcher": [
+        "Geoffrey Hinton", "Yann LeCun", "Yoshua Bengio", "Andrew Ng", "Fei-Fei Li",
+        "Demis Hassabis", "Ilya Sutskever", "Ian Goodfellow", "Andrej Karpathy",
+        "Daphne Koller", "Michael I. Jordan", "Christopher Manning", "Jitendra Malik",
+        "Kaiming He", "Ross Girshick", "Alex Krizhevsky", "Karen Simonyan"
+    ],
+    "discipline": [
+        "Machine Learning", "Artificial Intelligence", "Computer Vision", "Natural Language Processing",
+        "Robotics", "Quantum Computing", "Bioinformatics", "Computational Biology",
+        "Theoretical Physics", "Organic Chemistry", "Molecular Biology", "Neuroscience",
+        "Astrophysics", "Genetics", "Econometrics", "Political Science"
+    ],
+    "field": [
+        "Deep Learning", "Reinforcement Learning", "Transfer Learning", "Few-Shot Learning",
+        "Computer Graphics", "Human-Computer Interaction", "Distributed Systems",
+        "Cryptography", "Information Retrieval", "Recommender Systems",
+        "Speech Recognition", "Image Segmentation", "Object Detection"
+    ],
+    "theory": [
+        "Theory of Relativity", "Quantum Mechanics", "Evolution by Natural Selection",
+        "Information Theory", "Game Theory", "Chaos Theory", "String Theory",
+        "Big Bang Theory", "Germ Theory of Disease", "Plate Tectonics"
+    ],
+    "task": [
+        "Image Classification", "Object Detection", "Semantic Segmentation",
+        "Named Entity Recognition", "Relation Extraction", "Question Answering",
+        "Machine Translation", "Text Summarization", "Sentiment Analysis",
+        "Speech Recognition", "Text Generation", "Knowledge Graph Construction"
+    ],
+    "metrics": [
+        "F1 Score", "Precision", "Recall", "Accuracy", "AUC-ROC",
+        "BLEU Score", "ROUGE Score", "Perplexity", "Mean Average Precision",
+        "Intersection over Union", "Word Error Rate", "Cross-Entropy Loss"
+    ],
+    "algorithm": [
+        "Gradient Descent", "Backpropagation", "Adam Optimizer", "Dropout",
+        "Batch Normalization", "Attention Mechanism", "Transformer Architecture",
+        "Convolutional Neural Network", "Recurrent Neural Network", "LSTM",
+        "ResNet", "BERT", "GPT", "YOLO", "U-Net", "GAN"
+    ],
+    "chemicalcompound": [
+        "Water", "Carbon Dioxide", "Methane", "Ethanol", "Glucose",
+        "Sodium Chloride", "Sulfuric Acid", "Ammonia", "Acetylsalicylic Acid",
+        "Penicillin", "Insulin", "Caffeine", "Nicotine", "Morphine"
+    ],
+    "chemicalelement": [
+        "Hydrogen", "Oxygen", "Carbon", "Nitrogen", "Iron",
+        "Gold", "Silver", "Copper", "Platinum", "Uranium",
+        "Helium", "Neon", "Argon", "Lithium", "Sodium"
+    ],
+    "protein": [
+        "Hemoglobin", "Insulin", "Collagen", "Keratin", "Myosin",
+        "Actin", "Albumin", "Antibody", "Enzyme", "Receptor Protein",
+        "p53", "BRCA1", "Spike Protein", "Cas9", "GFP"
+    ],
+    "enzyme": [
+        "DNA Polymerase", "RNA Polymerase", "Lipase", "Amylase", "Protease",
+        "ATP Synthase", "Helicase", "Ligase", "Kinase", "Phosphatase",
+        "CRISPR-Cas9", "Restriction Enzyme", "Reverse Transcriptase"
+    ],
+    "astronomicalobject": [
+        "Sun", "Moon", "Mars", "Jupiter", "Saturn", "Venus", "Mercury",
+        "Milky Way", "Andromeda Galaxy", "Proxima Centauri", "Alpha Centauri",
+        "Black Hole M87", "Sagittarius A*", "Crab Nebula", "Orion Nebula",
+        "Halley's Comet", "Asteroid Bennu", "Pluto", "Europa", "Titan"
+    ],
+    "misc": [
+        "Project Alpha", "Initiative X", "Phase Two", "Category A", "Type B",
+        "unknown entity", "unspecified object", "classified item", "redacted name",
+        "the entity", "the subject", "the target", "reference point"
     ],
 }
 
@@ -642,64 +2459,124 @@ ZH_ENTITIES = {
         "沈大偉", "余志平", "盧俊義", "葉大山", "魏小寶"
     ],
     "politician": [
-        "蔡英文", "習近平", "李克強", "王毅", "賴清德"
+        "蔡英文", "習近平", "李克強", "王毅", "賴清德", "韓國瑜", "朱立倫", "陳水扁", "馬英九", "林鄭月娥",
+        "汪洋", "栗戰書", "王滬寧", "趙樂際", "韓正", "劉鶴", "張高麗", "王岐山", "李源潮", "張德江", "俞正聲",
+        "胡錦濤", "溫家寶", "江澤民", "朱鎔基", "李鵬", "鄧小平", "毛澤東", "周恩來", "蔣介石"
     ],
     "scientist": [
-        "屠呦呦", "楊振寧", "李政道", "丁肇中", "錢學森", "袁隆平"
+        "屠呦呦", "楊振寧", "李政道", "丁肇中", "錢學森", "袁隆平", "高錕", "南仁東", "潘建偉", "施一公",
+        "吳恩達", "李飛飛", "張亞勤", "王小謨", "陳建民", "周忠和", "張首晟", "俞敏洪", "曹雪濤", "陳薇",
+        "施一公", "顧秉林", "葉培建", "朱棣文", "吳健雄", "李四光", "華羅庚", "錢三強", "竺可楨", "丁肇中"
     ],
     "athlete": [
-        "姚明", "劉翔", "李娜", "蘇炳添", "谷愛凌", "朱婷"
+        "姚明", "劉翔", "李娜", "蘇炳添", "谷愛凌", "朱婷", "林書豪", "王濛", "張繼科", "孫楊",
+        "陳夢", "馬龍", "張怡寧", "林丹", "郭晶晶", "張虹", "吳敏霞", "劉詩雯", "陳若琳", "馮坤",
+        "張琳芃", "武磊", "王霜", "孫雯", "李小鵬", "劉璇", "楊威", "張娜", "陳一冰", "周洋",
     ],
     "musician": [
-        "周杰倫", "林俊傑", "蔡依林", "張惠妹", "五月天", "鄧紫棋"
+        "周杰倫", "林俊傑", "蔡依林", "張惠妹", "五月天", "鄧紫棋", "王力宏", "張學友", "陳奕迅", "蕭敬騰",
+        "李榮浩", "楊丞琳", "田馥甄", "張韶涵", "林宥嘉", "吳青峰", "陳綺貞", "張震嶽", "羅大佑", "費玉清",
+        "鄧麗君", "張國榮", "梅艷芳", "譚詠麟", "Beyond", "張信哲", "王菲", "陳百強", "許冠傑", "林子祥"
     ],
     "actor": [
-        "成龍", "李連杰", "周潤發", "梁朝偉", "劉德華", "章子怡", "鞏俐"
+        "成龍", "李連杰", "周潤發", "梁朝偉", "劉德華", "章子怡", "鞏俐", "范冰冰", "黃渤", "吳京", "楊冪", "迪麗熱巴", "劉亦菲", "周星馳", "張曼玉",
+        "林青霞", "張國榮", "周迅", "孫儷", "楊紫瓊", "劉嘉玲", "張涵予", "陳道明", "黃曉明", "胡歌", "井柏然", "趙薇", "范偉", "徐峥", "吳彥祖",
+        "陳坤", "吳秀波", "張譯", "李冰冰", "劉青雲", "古天樂", "吳鎮宇", "張家輝", "任達華", "謝霆鋒"
     ],
     "director": [
-        "張藝謀", "李安", "王家衛", "陳凱歌", "馮小剛"
+        "張藝謀", "李安", "王家衛", "陳凱歌", "馮小剛", "吳宇森", "徐克", "姜文", "陳可辛", "賈樟柯",
+        "周星馳", "吳京", "林超賢", "韓寒", "寧浩", "張一白", "陳思誠", "葉偉信", "杜琪峯", "彭浩翔", "許鞍華",
+        "陳嘉上", "劉偉強", "王晶", "徐崢", "薛曉路", "陳正道", "田壯壯", "吳念真", "李少紅", "陳衍儒"
     ],
     "author": [
-        "莫言", "余華", "劉慈欣", "金庸", "瓊瑤"
+        "莫言", "余華", "劉慈欣", "金庸", "瓊瑤", "張愛玲", "巴金", "老舍", "魯迅", "曹雪芹",
+        "施耐庵", "吳承恩", "羅貫中", "金庸", "古龍", "梁羽生", "王小波", "韓寒", "郭敬明", "張悅然", "劉震雲",
+        "賈平凹", "畢飛宇", "陳忠實", "蘇童", "張炜", "余秋雨", "龍應台", "李敖", "林清玄", "三毛"
     ],
     "company": [
         "台積電", "鴻海", "聯發科", "華碩", "宏碁", "阿里巴巴", "騰訊", "百度", "華為", "小米",
-        "京東", "美團", "字節跳動", "拼多多", "滴滴", "網易", "聯想", "比亞迪", "寧德時代"
+        "京東", "美團", "字節跳動", "拼多多", "滴滴", "網易", "聯想", "比亞迪", "寧德時代",
+        "中興通訊", "海康威視", "中國移動", "中國電信", "中國聯通", "中國石油", "中國石化", "中國建築", "中國鐵建", "中國中鐵",
+        "中國平安", "中國人壽", "中國銀行", "工商銀行", "建設銀行", "農業銀行", "交通銀行", "招商銀行", "光大銀行", "浦發銀行",
+        "中國太平洋保險", "中國人保", "中國郵政集團", "中國煙草總公司", "中國航天科技集團", "中國航天科工集團"
     ],
     "startup": [
-        "商湯科技", "曠視科技", "依圖科技", "雲從科技", "字節跳動"
+        "商湯科技", "曠視科技", "依圖科技", "雲從科技", "字節跳動", "快手", "拼多多", "滴滴出行", "美團點評", "小紅書",
+        "B站", "知乎", "愛奇藝", "蔚來汽車", "小鵬汽車", "理想汽車", "貝殼找房", "車好多", "趣店", "歡聚時代", "映客直播",
+        "陌陌", "一直播", "火山小視頻", "微播易", "有贊", "微盟", "拉勾網", "獵聘網", "Boss直聘", "脈脈"
     ],
     "university": [
         "北京大學", "清華大學", "復旦大學", "上海交通大學", "浙江大學",
-        "台灣大學", "成功大學", "交通大學", "中央大學", "中山大學"
+        "台灣大學", "成功大學", "交通大學", "中央大學", "中山大學",
+        "南京大學", "武漢大學", "華中科技大學", "西安交通大學", "同濟大學", "南開大學", "天津大學", "吉林大學", "東北大學", "哈爾濱工業大學",
+        "中南大學", "湖南大學", "廈門大學", "四川大學", "重慶大學", "華南理工大學", "中科大", "蘭州大學", "西北工業大學", "北京航空航天大學"
     ],
     "sports_team": [
-        "中國國家足球隊", "中華台北隊", "廣州恆大", "北京國安", "上海上港"
+        "中國國家足球隊", "中華台北隊", "廣州恆大", "北京國安", "上海上港",
+        "深圳隊", "武漢卓爾", "天津泰達", "山東魯能", "江蘇蘇寧",
+        "台灣職棒兄弟象", "統一獅", "富邦悍將", "中信兄弟", "味全龍",
+        "台北富邦勇士", "新北國王", "高雄鋼鐵人", "桃園領航猿", "台中太陽",
+        "北京首鋼隊", "廣東宏遠隊", "遼寧飛豹隊", "新疆廣匯隊", "山東西王隊"
     ],
     "bank": [
-        "中國工商銀行", "中國建設銀行", "中國銀行", "國泰世華銀行", "中國信託"
+        "中國工商銀行", "中國建設銀行", "中國銀行", "國泰世華銀行", "中國信託",
+        "台新銀行", "土地銀行", "合作金庫銀行", "華南銀行", "第一商業銀行",
+        "花旗銀行", "渣打銀行", "匯豐銀行", "星展銀行", "永豐銀行",
+        "台灣土地銀行", "兆豐國際商業銀行", "台灣中小企業銀行", "台灣農業金庫", "台灣銀行"
     ],
     "city": [
         "台北", "新竹", "台中", "高雄", "北京", "上海", "深圳", "杭州", "廣州", "成都",
-        "香港", "澳門", "南京", "武漢", "西安", "青島", "廈門"
+        "香港", "澳門", "南京", "武漢", "西安", "青島", "廈門", "大連", "蘇州", "天津", "重慶",
+        "福州", "長沙", "昆明", "南寧", "濟南", "合肥", "鄭州", "石家莊", "太原", "呼和浩特",
+        "烏魯木齊", "拉薩", "銀川", "海口", "三亞", "珠海", "廊坊", "唐山", "煙台", "威海",
+        "紹興", "嘉興", "湖州", "金華", "衢州", "舟山", "臺州", "溫州"
     ],
     "country": [
-        "中國", "台灣", "日本", "韓國", "新加坡", "美國"
+        "中國", "台灣", "日本", "韓國", "新加坡", "美國", "加拿大", "澳大利亞", "英國", "法國",
+        "德國", "俄羅斯", "印度", "巴西", "南非", "墨西哥", "印尼", "泰國", "越南", "菲律賓",
+        "馬來西亞", "紐西蘭", "荷蘭", "比利時", "瑞士", "瑞典", "挪威", "丹麥", "芬蘭", "奧地利", "愛爾蘭",
+        "葡萄牙", "希臘", "土耳其", "埃及", "阿聯酋", "沙特阿拉伯", "以色列", "卡塔爾", "科威特", "巴林"
     ],
     "product": [
         "微信", "QQ", "抖音", "TikTok", "支付寶", "淘寶", "天貓", "京東商城",
-        "華為Mate", "小米手機", "OPPO", "vivo", "比亞迪電動車"
+        "華為Mate", "小米手機", "OPPO", "vivo", "比亞迪電動車", "蔚來汽車", "理想汽車", "小鵬汽車", "聯想筆記本", "戴爾電腦", "蘋果iPhone", "三星手機",
+        "華碩筆記本", "宏碁電腦", "小熊電器", "美的空調", "海爾冰箱", "格力空調", "海信電視", "TCL手機", "一加手機", "魅族手機",
+        "360安全衛士", "搜狗輸入法", "百度地圖", "高德地圖", "滴滴出行", "美團外賣", "餓了麼", "攜程旅行"
     ],
     "movie": [
-        "戰狼2", "流浪地球", "哪吒之魔童降世", "長津湖", "紅海行動"
+        "戰狼2", "流浪地球", "哪吒之魔童降世", "長津湖", "紅海行動", "唐人街探案", "我不是藥神", "中國機長", "八佰", "速度與激情：特別行動",
+        "復仇者聯盟4：終局之戰", "蜘蛛人：英雄無歸", "侏羅紀世界3", "速度與激情9", "黑寡婦", "星際異攻隊3", "神奇女俠1984", "正義聯盟", "水行俠", "雷神4：愛與雷霆",
+        "變形金剛：終極戰士", "死侍2", "X戰警：黑鳳凰", "金剛戰士", "驚奇隊長", "蟻人與黃蜂女", "黑豹", "奇異博士", "銀河護衛隊2", "美國隊長3：英雄內戰"
     ],
     "book": [
-        "三體", "活著", "圍城", "紅樓夢", "射雕英雄傳"
+        "三體", "活著", "圍城", "紅樓夢", "射雕英雄傳", "天龍八部", "笑傲江湖", "倚天屠龍記", "平凡的世界", "白鹿原",
+        "哈利波特系列", "指環王", "冰與火之歌", "達·芬奇密碼", "安娜·卡列尼娜", "戰爭與和平", "悲慘世界", "小王子", "1984",
+        "動物農場", "了不起的蓋茨比", "追風箏的人", "解憂雜貨店", "嫌疑人X的獻身", "白夜行", "東野圭吾作品集", "福爾摩斯探案集", "時間簡史", "自私的基因"
     ],
     "award": [
-        "金馬獎", "金鐘獎", "金曲獎", "中國電影金雞獎", "華語電影傳媒大獎"
+        "金馬獎", "金鐘獎", "金曲獎", "中國電影金雞獎", "華語電影傳媒大獎",
+        "百花獎", "香港電影金像獎", "亞洲電影大獎", "中國電視金鷹獎", "中國文學獎",
+        "魯迅文學獎", "茅盾文學獎", "曹禺戲劇獎", "華語電影最佳導演獎", "最佳男主角獎", "最佳女主角獎",
+        "最佳編劇獎", "最佳攝影獎", "最佳剪輯獎", "最佳音樂獎"
     ],
-    "date": ["2024年", "2023年", "2022年", "2021年", "2020年", "2010年", "2000年", "1990年"],
+    "date": ["12月25日", "1月1日", "7月4日", "10月1日113年", "2月14日", "6月1日", "11月11日", "3月8日", "5月1日", "9月10日","112/08/20",
+             "111/12/31", "110/10/10", "109/05/20", "108/03/15", "107/07/04"
+             ],
+    "year": ["2024年", "2023年", "2022年", "2021年", "2020年", "2019年", "2018年", "2017年", "2016年", "2015年"],
+    "month": ["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月",
+              "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"],
+    "century": ["21世紀", "20世紀", "19世紀", "18世紀", "17世紀", "16世紀", "15世紀", "14世紀", "13世紀", "12世紀"],
+    "location": [
+        "故宮", "長城", "西湖", "黃山", "張家界", "九寨溝",
+        "桂林", "兵馬俑", "天壇", "頤和園", "峨眉山", "廬山", "泰山", "雲南石林", "鳳凰古城",
+        "陽朔", "西雙版納", "青海湖", "拉薩布達拉宮", "新疆天山", "內蒙古草原",
+        "黃果樹瀑布", "千島湖", "雲南大理", "雲南麗江", "福建土樓", "武夷山", "廈門鼓浪嶼",
+        "泉州古城", "潮州古城", "廣州塔", "深圳灣大橋", "珠海長隆", "澳門大三巴牌坊",
+        "香港維多利亞港", "澳門威尼斯人", "香港迪士尼樂園", "上海外灘", "南京路步行街", "東方明珠塔",
+        ],
+    "animal": ["狮子", "老虎", "大象", "狗", "猫", "鹰", "鲨鱼", "熊猫", "企鹅", "狼"],
+    "plant": ["玫瑰", "橡树", "仙人掌", "向日葵", "竹子", "松树", "郁金香", "兰花"],
+    "instrument": ["吉他", "钢琴", "小提琴", "鼓", "长笛", "萨克斯", "古筝", "二胡"],
 }
 
 # === JAPANESE ENTITIES ===
@@ -768,6 +2645,9 @@ JA_ENTITIES = {
     ],
     "date": ["2024年", "2023年", "2022年", "2021年", "2020年", "2010年", "2000年", "1990年"],
     "location": ["秋葉原", "新宿", "銀座", "道頓堀", "六本木ヒルズ"],
+    "animal": ["ライオン", "虎", "象", "犬", "猫", "鷲", "サメ", "パンダ", "ペンギン", "狼"],
+    "plant": ["バラ", "オーク", "サボテン", "ひまわり", "竹", "松", "チューリップ", "蘭"],
+    "instrument": ["ギター", "ピアノ", "バイオリン", "ドラム", "フルート", "サックス", "三味線", "琴"],
 }
 
 # === KOREAN ENTITIES ===
@@ -828,6 +2708,9 @@ KO_ENTITIES = {
         "대종상", "청룡영화상", "백상예술대상", "멜론뮤직어워드"
     ],
     "date": ["2024년", "2023년", "2022년", "2021년", "2020년", "2010년", "2000년"],
+    "animal": ["사자", "호랑이", "코끼리", "개", "고양이", "독수리", "상어", "판다", "펭귄", "늑대"],
+    "plant": ["장미", "참나무", "선인장", "해바라기", "대나무", "소나무", "튤립", "난초"],
+    "instrument": ["기타", "피아노", "바이올린", "드럼", "플루트", "색소폰", "가야금", "해금"],
 }
 
 # === THAI ENTITIES ===
@@ -883,6 +2766,9 @@ TH_ENTITIES = {
         "สุพรรณหงส์", "นาฏราช", "ตุ๊กตาทอง"
     ],
     "date": ["2024", "2023", "2022", "2021", "2020", "2010", "2000"],
+    "animal": ["สิงโต", "เสือ", "ช้าง", "สุนัข", "แมว", "นกอินทรี", "ฉลาม", "วาฬ", "เพนกวิน", "แพนด้า"],
+    "plant": ["กุหลาบ", "ต้นโอ๊ก", "กระบองเพชร", "ทานตะวัน", "ไผ่", "สน", "ทิวลิป", "กล้วยไม้"],
+    "instrument": ["กีตาร์", "เปียโน", "ไวโอลิน", "กลอง", "ขลุ่ย", "แซกโซโฟน", "ระนาด", "ซออู้"],
 }
 ZH_ENTITIES.update({
     "person": ZH_ENTITIES["person"] + ["任正非", "孟晚舟", "王傳福", "潘石屹", "董明珠"],
@@ -940,6 +2826,8 @@ def get_entity(entities_dict: Dict, entity_type: str) -> str:
     
     # Try parent category mapping
     type_mapping = {
+        # 🔥 ZERO-SHOT: US vs UK spelling
+        "organization": "organization",  # US spelling → UK spelling in entities
         "politician": "person",
         "scientist": "person",
         "artist": "person",
@@ -954,14 +2842,14 @@ def get_entity(entities_dict: Dict, entity_type: str) -> str:
         "journalist": "person",
         "chef": "person",
         "startup": "company",
-        "nonprofit": "organisation",
-        "government_agency": "organisation",
+        "nonprofit": "organization",
+        "government_agency": "organization",
         "school": "university",
-        "hospital": "organisation",
-        "military": "organisation",
-        "political_party": "organisation",
+        "hospital": "organization",
+        "military": "organization",
+        "political_party": "organization",
         "research_institute": "university",
-        "museum": "organisation",
+        "museum": "organization",
         "restaurant": "company",
         "hotel": "company",
         "state": "city",
@@ -1033,6 +2921,10 @@ def get_entity(entities_dict: Dict, entity_type: str) -> str:
         # ย้ายความสัมพันธ์เดิมบางส่วนให้แม่นยำขึ้น
         "medicine": "medicine",     # เปลี่ยนจาก product เป็น medicine โดยตรง
         "vaccine": "medicine",
+        "treatment": "medicine",
+
+
+        
     }
     
     if entity_type in type_mapping:
@@ -1231,9 +3123,9 @@ EN_TEMPLATES = [
      [("company", "company"), ("money", "money"), ("date", "date")], 
      [("company", "money", "revenue_of")]),
 
-     ("The official website of {organisation} is {url}.", 
-     [("organisation", "organisation"), ("url", "url")], 
-     [("organisation", "url", "official_website")]),
+     ("The official website of {organization} is {url}.", 
+     [("organization", "organization"), ("url", "url")], 
+     [("organization", "url", "official_website")]),
     
     ("You can contact {person} via email at {email}.", 
      [("person", "person"), ("email", "email")], 
@@ -1318,6 +3210,105 @@ EN_TEMPLATES = [
     ("Observed from {research_institute}, the {celestial_object} was identified as a {particle_physics_term} emitter.",
      [("research_institute", "research_institute"), ("celestial_object", "celestial_object"), ("particle_physics_term", "particle_physics_term")],
      [("research_institute", "celestial_object", "observes")]),
+
+
+
+    #all relations covered
+    ("{person} is the founder and CEO of {company}, which developed {product} in {city} in {date}.",
+     [("person", "person"), ("company", "company"), ("product", "product"), ("city", "city"), ("date", "date")],
+     [("person", "company", "founder_of"), ("person", "company", "ceo_of"), ("company", "product", "developed"), ("company", "city", "located_in"), ("company", "date", "founded_in")]),
+
+     ("{person} graduated from {university} in {date} and now works at {company} in {city}.",
+     [("person", "person"), ("university", "university"), ("date", "date"), ("company", "company"), ("city", "city")],
+     [("person", "university", "graduated_from"), ("person", "date", "graduated_in"), ("person", "company", "works_at"), ("company", "city", "located_in")]),   
+
+     ("{actor} starred in {movie}, directed by {director}, and won the {award} for best performance in {date}.",
+     [("actor", "actor"), ("movie", "movie"), ("director", "director"), ("award", "award"), ("date", "date")],
+     [("actor", "movie", "starred_in"), ("director", "movie", "director_of"), ("actor", "award", "won"), ("award", "date", "awarded_in")]),
+
+     ("{scientist} discovered {celestial_object} using the telescope at {research_institute} and published the findings in {research_paper}.",
+     [("scientist", "scientist"), ("celestial_object", "celestial_object"), ("research_institute", "research_institute"), ("research_paper", "research_paper")],
+     [("scientist", "celestial_object", "discovered_by"), ("scientist", "research_institute", "research_at"), ("scientist", "research_paper", "author_of")]),
+
+     ("{company} acquired {startup} for {money} in {date}, with {person} leading the negotiations as CEO.",
+     [("company", "company"), ("startup", "startup"), ("money", "money"), ("date", "date"), ("person", "person")],
+     [("startup", "company", "acquired_by"), ("company", "money", "paid_for"), ("company", "date", "acquired_in"), ("person", "company", "ceo_of")]),
+
+     ("{person}, the CEO of {company}, announced the development of {product} in {city} in {date}.",
+     [("person", "person"), ("company", "company"), ("product", "product"), ("city", "city"), ("date", "date")],
+     [("person", "company", "ceo_of"), ("company", "product", "developed"), ("company", "city", "located_in"), ("company", "date", "founded_in")]), 
+
+     ("{person} founded {company} in {date}, which developed {product} and is headquartered in {city}.",
+     [("person", "person"), ("company", "company"), ("date", "date"), ("product", "product"), ("city", "city")],
+     [("person", "company", "founder_of"), ("company", "date", "founded_in"), ("company", "product", "developed"), ("company", "city", "headquartered_in")]),
+
+     ("{person} graduated from {university} in {date} and now works at {company}, which is headquartered in {city}.",
+     [("person", "person"), ("university", "university"), ("date",  "date"), ("company", "company"), ("city", "city")],
+     [("person", "university", "graduated_from"), ("person", "date", "graduated_in"), ("person", "company", "works_at"), ("company", "city", "headquartered_in")]),
+
+
+     ("{actor} starred in {movie}, directed by {director}, and won the {award} for best performance in {date}. The movie was filmed in {city}.",
+     [("actor", "actor"), ("movie", "movie"), ("director", "director"), ("award", "award"), ("date", "date"), ("city", "city")],
+     [("actor", "movie", "starred_in"), ("director", "movie", "director_of"), ("actor", "award", "won"), ("award", "date", "awarded_in"), ("movie", "city", "filmed_in")]),
+
+     ("{scientist} discovered {celestial_object} using the telescope at {research_institute} and published the findings in {research_paper}. The research institute is located in {city}.",
+     [("scientist", "scientist"), ("celestial_object", "celestial_object"), ("research_institute", "research_institute"), ("research_paper", "research_paper"), ("city", "city")],
+     [("scientist", "celestial_object", "discovered_by"), ("scientist", "research_institute", "research_at"), ("scientist", "research_paper", "author_of"), ("research_institute", "city", "located_in")]),
+
+     ("{company} acquired {startup} for {money} in {date}, with {person} leading the negotiations as CEO. The startup is based in {city}.",
+     [("company", "company"), ("startup", "startup"), ("money", "money"), ("date", "date"), ("person", "person"), ("city", "city")],
+     [("startup", "company", "acquired_by"), ("company", "money", "paid_for"), ("company", "date", "acquired_in"), ("person", "company", "ceo_of"), ("startup", "city", "based_in")]),
+
+     ("{person}, the CEO of {company}, announced the development of {product} in {city} in {date}. The product was released globally in {date2}.",
+     [("person", "person"), ("company", "company"), ("product", "product"), ("city", "city"), ("date", "date"), ("date2", "date")],
+     [("person", "company", "ceo_of"), ("company", "product", "developed"), ("company", "city", "located_in"), ("company", "date", "founded_in"), ("product", "date2", "released_in")]),
+
+
+    #relation between person and person
+    ("{person} is a business partner of {person2}.",
+        [("person", "person"), ("person2", "person")],
+        [("person", "person2", "partner_with")]),
+    
+    ("{person} is married to {person2}.",
+        [("person", "person"), ("person2", "person")],
+        [("person", "person2", "spouse_of")]),
+
+    ("{person} collaborates with {person2} on various projects.",
+        [("person", "person"), ("person2", "person")],
+        [("person", "person2", "collaborates_with")]),
+
+    ("{person} is the mentor of {person2}.",
+        [("person", "person"), ("person2", "person")],
+        [("person", "person2", "mentor_of")]),
+
+    ("{person} and {person2} co-founded {company}.",
+        [("person", "person"), ("person2", "person"), ("company", "company")],
+        [("person", "company", "co_founder_of"), ("person2", "company", "co_founder_of")]),
+
+    ("{person} frequently collaborates with {person2} in their professional endeavors.",
+        [("person", "person"), ("person2", "person")],
+        [("person", "person2", "collaborates_with")]),
+
+
+
+
+
+    ("{person} speaks {language} fluently.",
+     [("person", "person"), ("language", "language")],
+     [("person", "language", "speaks")]),
+    
+    ("{musician} plays the {instrument} beautifully.",
+     [("musician", "musician"), ("instrument", "instrument")],
+     [("musician", "instrument", "plays")]),
+    
+    ("The {animal} is found in the {location}.",
+     [("animal", "animal"), ("location", "location")],
+     [("animal", "location", "found_in")]),
+     
+    ("The {animal} mainly eats {food}.",
+     [("animal", "animal"), ("food", "food")],
+     [("animal", "food", "eats")]),
+
 ]
 
 # Chinese Templates
@@ -1619,9 +3610,9 @@ TH_TEMPLATES = [
     ("{person} ใช้ชีวิตส่วนใหญ่อยู่ใน{city}", 
      [("person", "person"), ("city", "city")], [("person", "city", "lives_in")]),
 
-     ("เว็บไซต์ทางการของ {organisation} คือ {url}", 
-     [("organisation", "organisation"), ("url", "url")], 
-     [("organisation", "url", "official_website")]),
+     ("เว็บไซต์ทางการของ {organization} คือ {url}", 
+     [("organization", "organization"), ("url", "url")], 
+     [("organization", "url", "official_website")]),
 
      ("{company} จดทะเบียนในตลาดหลักทรัพย์ด้วยชื่อ {stock_symbol} และมีมูลค่าบริษัท {money}", 
      [("company", "company"), ("stock_symbol", "stock_symbol"), ("money", "money")], 
@@ -1677,6 +3668,22 @@ TH_TEMPLATES = [
     ("{person} ผู้เชี่ยวชาญด้าน {academic_field} จาก {university} ได้รับเลือกให้เป็น {title} ประจำปี {date}",
      [("person", "person"), ("academic_field", "academic_field"), ("university", "university"), ("title", "title"), ("date", "date")],
      [("person", "university", "graduated_from"), ("person", "academic_field", "specialist_in")]),
+
+    ("{person} พูดภาษา{language}ได้อย่างคล่องแคล่ว",
+     [("person", "person"), ("language", "language")],
+     [("person", "language", "speaks")]),
+    
+    ("{musician} เล่น{instrument}ได้อย่างไพเราะ",
+     [("musician", "musician"), ("instrument", "instrument")],
+     [("musician", "instrument", "plays")]),
+
+    ("{animal} มักพบได้ใน{location}",
+     [("animal", "animal"), ("location", "location")],
+     [("animal", "location", "found_in")]),
+     
+    ("อาหารหลักของ{animal} คือ {food}",
+     [("animal", "animal"), ("food", "food")],
+     [("animal", "food", "eats")]),
 ]
 
 # (Template, Entity_List, Relation_List)
@@ -1776,11 +3783,11 @@ def apply_coreference_logic(sample_data):
     
     # พจนานุกรมสรรพนามแยกตามภาษา
     pronoun_map = {
-        "en": {"person": "He", "organisation": "It", "company": "It", "default": "It", "suffix": " is leading the field."},
-        "th": {"person": "เขา", "organisation": "มัน", "company": "องค์กรนี้", "default": "สิ่งนี้", "suffix": "กำลังเป็นผู้นำในอุตสาหกรรม"},
-        "zh": {"person": "他", "organisation": "它", "company": "該公司", "default": "它", "suffix": "目前在行業中處於領先地位"},
-        "ja": {"person": "彼", "organisation": "それ", "company": "同社", "default": "それ", "suffix": "は現在業界をリードしています"},
-        "ko": {"person": "그", "organisation": "그것", "company": "이 회사는", "default": "그것", "suffix": " 현재 업계를 선도하고 있습니다"}
+        "en": {"person": "He", "organization": "It", "company": "It", "default": "It", "suffix": " is leading the field."},
+        "th": {"person": "เขา", "organization": "มัน", "company": "องค์กรนี้", "default": "สิ่งนี้", "suffix": "กำลังเป็นผู้นำในอุตสาหกรรม"},
+        "zh": {"person": "他", "organization": "它", "company": "該公司", "default": "它", "suffix": "目前在行業中處於領先地位"},
+        "ja": {"person": "彼", "organization": "それ", "company": "同社", "default": "それ", "suffix": "は現在業界をリードしています"},
+        "ko": {"person": "그", "organization": "그것", "company": "이 회사는", "default": "그것", "suffix": " 현재 업계를 선도하고 있습니다"}
     }
 
     if entities and random.random() < 0.3:
@@ -1806,11 +3813,14 @@ def apply_coreference_logic(sample_data):
         # คำนวณตำแหน่งสรรพนามใน Text ใหม่
         pronoun_start = old_len + 1 # +1 สำหรับช่องว่าง
         
+        description = target_ent.get("description", "")
+        
         entities.append({
             "start": pronoun_start,
             "end": pronoun_start + len(pronoun),
             "label": label, # ใช้ Label เดียวกับตัวหลัก
-            "text": pronoun
+            "text": pronoun,
+            "description": description
         })
         
     return text, entities, relations
@@ -1848,21 +3858,25 @@ def add_hard_negatives(sample_data, entities_dict):
                 ent["end"] += offset
             
             # เพิ่ม Entity หลอกลงใน Metadata (แต่ไม่เพิ่มใน Relations!)
+            description = get_label_description(fake_type, label_type="entity")
             entities.append({
                 "start": chosen_noise.find(fake_val),
                 "end": chosen_noise.find(fake_val) + len(fake_val),
                 "label": fake_type,
-                "text": fake_val
+                "text": fake_val,
+                "description": description
             })
         else:
             # กรณี Noise อยู่ข้างหลัง (ไม่ต้องแก้ Offset)
             start_pos = len(text) + chosen_noise.find(fake_val)
             text = text + chosen_noise
+            description = get_label_description(fake_type, label_type="entity")
             entities.append({
                 "start": start_pos,
                 "end": start_pos + len(fake_val),
                 "label": fake_type,
-                "text": fake_val
+                "text": fake_val,
+                "description": description
             })
             
     return text, entities
@@ -2084,19 +4098,50 @@ def apply_indirect_reference(text: str, entity_text: str, entity_type: str, prob
     return text
 
 def apply_semantic_reversal(template: str, entity_defs: List, relation_defs: List) -> Tuple[str, List, List]:
-    """สลับโครงสร้างประโยค (Semantic Reversal) เช่น Active เป็น Passive"""
-    # ตัวอย่างเฉพาะทางสำหรับ Relation บางประเภท
+    """สลับโครงสร้างประโยค (Semantic Reversal) เช่น Active เป็น Passive
+    
+    🔥 FIX: Language-Aware Templates เพื่อป้องกัน Language Mixing
+    """
+    # ตรวจจับภาษาจาก Template ก่อน
+    lang = detect_language_from_template(template)
+    
+    # Reversal templates per language
     reversal_map = {
-        "founder_of": "{tail} was founded by {head}",
-        "ceo_of": "The CEO of {tail} is {head}",
-        "developed": "{tail} was developed by {head}"
+        "en": {
+            "founder_of": "{tail} was founded by {head}",
+            "ceo_of": "The CEO of {tail} is {head}",
+            "developed": "{tail} was developed by {head}"
+        },
+        "zh": {
+            "founder_of": "{tail}是由{head}創立的",
+            "ceo_of": "{tail}的執行長是{head}",
+            "developed": "{tail}是由{head}開發的"
+        },
+        "ja": {
+            "founder_of": "{tail}は{head}によって設立された",
+            "ceo_of": "{tail}のCEOは{head}だ",
+            "developed": "{tail}は{head}によって開発された"
+        },
+        "ko": {
+            "founder_of": "{tail}은 {head}에 의해 설립되었다",
+            "ceo_of": "{tail}의 CEO는 {head}이다",
+            "developed": "{tail}은 {head}에 의해 개발되었다"
+        },
+        "th": {
+            "founder_of": "{tail} ก่อตั้งโดย {head}",
+            "ceo_of": "ซีอีโอของ {tail} คือ {head}",
+            "developed": "{tail} พัฒนาโดย {head}"
+        }
     }
+    
+    # ใช้ English เป็น fallback
+    lang_map = reversal_map.get(lang, reversal_map["en"])
     
     new_template = template
     new_rels = relation_defs
     
     if random.random() < 0.3: # 30% สลับโครงสร้าง
-        for rel_type, new_fmt in reversal_map.items():
+        for rel_type, new_fmt in lang_map.items():
             for i, (h, t, r) in enumerate(relation_defs):
                 if r == rel_type:
                     # สร้าง Template ใหม่โดยอ้างอิง Placeholder เดิม
@@ -2105,15 +4150,69 @@ def apply_semantic_reversal(template: str, entity_defs: List, relation_defs: Lis
     
     return new_template, entity_defs, new_rels
 
-def get_interleaving_noise(entities_dict: Dict) -> str:
-    """สร้าง Entity ขวาง (Interleaving) ที่ไม่เกี่ยวข้องกัน"""
+
+def get_label_description(label: str, label_type: str = "entity") -> str:
+    """Retrieves a description for a given label."""
+    description = ""
+    
+    if label_type == "entity":
+        # 1. Try formal definition from ENTITY_TYPES
+        if label in ENTITY_TYPES:
+            description = ENTITY_TYPES[label]
+        # 2. Try synonyms list if no formal definition
+        elif label in ENTITY_LABEL_SYNONYMS:
+             description = f"An entity referring to {', '.join(ENTITY_LABEL_SYNONYMS[label])}."
+        # 3. If label itself is a phrase string (from synonym augmentation)
+        # We assume the caller passes the CANONICAL label. 
+            
+    elif label_type == "relation":
+        # 1. Try formal definition from RELATION_TYPES (value is tuple: (head, tail, desc))
+        if label in RELATION_TYPES:
+            description = RELATION_TYPES[label][2]
+        # 2. Try synonyms list
+        elif label in RELATION_LABEL_SYNONYMS:
+            description = f"A relation indicating {', '.join(RELATION_LABEL_SYNONYMS[label])}."
+            
+    return description
+
+
+def get_interleaving_noise(entities_dict: Dict, lang: str = "en") -> str:
+    """สร้าง Entity ขวาง (Interleaving) ที่ไม่เกี่ยวข้องกัน
+    
+    🔥 FIX: Language-Aware Noise เพื่อป้องกัน Language Mixing
+    """
     fake_type = random.choice(["person", "company", "city"])
     fake_val = get_entity(entities_dict, fake_type)
-    distractors = [
-        f", along with {fake_val},",
-        f" (while {fake_val} was absent)",
-        f" and {fake_val}"
-    ]
+    
+    distractors_by_lang = {
+        "en": [
+            f", along with {fake_val},",
+            f" (while {fake_val} was absent)",
+            f" and {fake_val}"
+        ],
+        "zh": [
+            f"，與{fake_val}一起，",
+            f"（{fake_val}不在場時）",
+            f"和{fake_val}"
+        ],
+        "ja": [
+            f"、{fake_val}と共に、",
+            f"（{fake_val}が不在の間）",
+            f"と{fake_val}"
+        ],
+        "ko": [
+            f", {fake_val}와 함께,",
+            f" ({fake_val} 부재 중)",
+            f"과 {fake_val}"
+        ],
+        "th": [
+            f" พร้อมกับ {fake_val}",
+            f" (ขณะที่ {fake_val} ไม่อยู่)",
+            f" และ {fake_val}"
+        ]
+    }
+    
+    distractors = distractors_by_lang.get(lang, distractors_by_lang["en"])
     return random.choice(distractors)
 
 
@@ -2121,9 +4220,33 @@ def get_interleaving_noise(entities_dict: Dict) -> str:
 #  generate_sample function
 # -----------------------------------------------------------------
 
-def generate_sample(templates: List, entities_dict: Dict) -> Dict:
-    template_raw, entity_defs, relation_defs = random.choice(templates)
+def detect_language_from_template(template: str) -> str:
+    """ตรวจจับภาษาจาก Template"""
+    if any('\u4e00' <= char <= '\u9fff' for char in template):
+        return 'zh'
+    elif any('\u3040' <= char <= '\u30ff' for char in template):
+        return 'ja'
+    elif any('\uac00' <= char <= '\ud7af' for char in template):
+        return 'ko'
+    elif any('\u0e00' <= char <= '\u0e7f' for char in template):
+        return 'th'
+    return 'en'
 
+def generate_sample(templates: List, entities_dict: Dict, use_style_variation: bool = True) -> Dict:
+    template_raw, entity_defs, relation_defs = random.choice(templates)
+    
+    # ตรวจจับภาษา
+    lang = detect_language_from_template(template_raw)
+    
+    # [NEW] Style Variation: 30% โอกาสใช้ Template แบบ Style ต่างๆ
+    applied_style = None
+    if use_style_variation and random.random() < 0.3 and relation_defs:
+        # ลองหา Styled Template สำหรับ Relation แรก
+        first_rel = relation_defs[0][2] if len(relation_defs) > 0 else None
+        if first_rel:
+            styled_template, applied_style = get_styled_template(first_rel, lang)
+            if styled_template:
+                template_raw = styled_template
 
     # [แทรกจุดที่ 1] สลับโครงสร้าง Active/Passive ก่อนเริ่มกระบวนการอื่น
     template_raw, entity_defs, relation_defs = apply_semantic_reversal(template_raw, entity_defs, relation_defs)
@@ -2134,6 +4257,9 @@ def generate_sample(templates: List, entities_dict: Dict) -> Dict:
     replacements = {}
     used_values = set()
     
+    # [NEW] Label Mapping Augmentation: เก็บ Mapping สำหรับ Cross-Label
+    label_mappings = {}
+    
     # 2. เตรียมข้อมูลสำหรับแต่ละ Placeholder
     for placeholder, entity_type in entity_defs:
         key = "{" + placeholder + "}"
@@ -2142,6 +4268,13 @@ def generate_sample(templates: List, entities_dict: Dict) -> Dict:
         # ป้องกันค่าซ้ำ
         while original_value in used_values:
             original_value = get_entity(entities_dict, entity_type)
+        
+        # 🔥 ZERO-SHOT: Cross-Label Mapping: 40% โอกาสเปลี่ยน Label (เพิ่มจาก 20%)
+        augmented_label = apply_label_mapping_augmentation(entity_type, probability=0.40)
+        label_mappings[placeholder] = {
+            "original": entity_type,
+            "augmented": augmented_label
+        }
         
         # --- APPLY NOISE STRATEGIES ---
         processed_value = original_value
@@ -2177,7 +4310,7 @@ def generate_sample(templates: List, entities_dict: Dict) -> Dict:
 
     # [แทรกจุดที่ 2] แทรกชื่อขวาง (Interleaving) ก่อนจะรวมร่างเป็นประโยค
     if random.random() < 0.2: # ใส่โอกาส 20%
-        noise = get_interleaving_noise(entities_dict)
+        noise = get_interleaving_noise(entities_dict, lang)  # 🔥 FIX: Pass language
         first_ph_key = "{" + entity_defs[0][0] + "}"
         template = template.replace(first_ph_key, first_ph_key + noise)
         
@@ -2194,20 +4327,45 @@ def generate_sample(templates: List, entities_dict: Dict) -> Dict:
 
     # 4. [NEW] AMBIGUOUS TERMS / LOOK-ALIKES (Hard Negative Mining)
     # เพิ่ม "ชื่อหลอก" ที่หน้าตาเหมือน Entity เข้าไปในประโยคแต่ไม่ Mark label
+    # 🔥 FIX: Language-Aware Filler Phrases เพื่อป้องกัน Language Mixing
     if random.random() < 0.3: # 30% ของข้อมูลจะมีตัวหลอก
         random_type = random.choice(list(entities_dict.keys()))
         fake_entity = get_entity(entities_dict, random_type)
         if fake_entity not in used_values:
-            filler_phrases = [
-                f" (similar to {fake_entity})",
-                f" unlike {fake_entity}",
-                f". Note: {fake_entity} was not involved."
-            ]
+            filler_phrases_by_lang = {
+                "en": [
+                    f" (similar to {fake_entity})",
+                    f" unlike {fake_entity}",
+                    f". Note: {fake_entity} was not involved."
+                ],
+                "zh": [
+                    f"（與{fake_entity}相似）",
+                    f"，與{fake_entity}不同",
+                    f"。注意：{fake_entity}並未參與。"
+                ],
+                "ja": [
+                    f"（{fake_entity}に似ている）",
+                    f"、{fake_entity}とは異なり",
+                    f"。注：{fake_entity}は関与していない。"
+                ],
+                "ko": [
+                    f" ({fake_entity}와 유사)",
+                    f", {fake_entity}와 달리",
+                    f". 참고: {fake_entity}은 관련되지 않았다."
+                ],
+                "th": [
+                    f" (คล้ายกับ {fake_entity})",
+                    f" ต่างจาก {fake_entity}",
+                    f" หมายเหตุ: {fake_entity} ไม่ได้เกี่ยวข้อง"
+                ]
+            }
+            filler_phrases = filler_phrases_by_lang.get(lang, filler_phrases_by_lang["en"])
             text += random.choice(filler_phrases)
 
 
     # [แทรกจุดที่ 4] ตัดสินใจว่าจะเป็นเคส "ไม่มีความสัมพันธ์" หรือไม่
-    is_negative_case = random.random() < 0.15
+    # 🔥 FIX: เพิ่มเป็น 50% เพื่อลดการเดามั่ว (เพิ่ม Precision ของ RE)
+    is_negative_case = random.random() < 0.50
 
     # 5. Build entities metadata
     entities = []
@@ -2215,14 +4373,31 @@ def generate_sample(templates: List, entities_dict: Dict) -> Dict:
         key = "{" + placeholder + "}"
         entity_text = replacements[key]
         
+        # [NEW] ใช้ Augmented Label ถ้ามี (Cross-Label Mapping)
+        final_label = entity_type
+        if placeholder in label_mappings:
+            # 50% โอกาสใช้ Augmented Label, 50% ใช้ Original
+            if random.random() < 0.5:
+                final_label = label_mappings[placeholder]["augmented"]
+        
+        # 🔥 Capture Canonical Label for Description (ก่อนจะถูกเปลี่ยนเป็น Synonym)
+        canonical_label_for_desc = final_label
+
+        # 🔥 V3: Label Synonym Augmentation - 50% โอกาสใช้ synonym
+        final_label = get_label_synonym(final_label, label_type="entity", probability=0.5)
+
+        # รับ Description (ใช้ canonical label ในการหา)
+        description = get_label_description(canonical_label_for_desc, label_type="entity")
+        
         # ค้นหาตำแหน่งที่ถูกต้อง (ระวังคำซ้ำ)
         start = text.find(entity_text)
         if start != -1:
             entities.append({
                 "start": start,
                 "end": start + len(entity_text),
-                "label": entity_type,
-                "text": entity_text
+                "label": final_label,
+                "text": entity_text,
+                "description": description
             })
 
     # Build relations
@@ -2238,10 +4413,23 @@ def generate_sample(templates: List, entities_dict: Dict) -> Dict:
                 
                 # 🔥 หัวใจสำคัญ: ต้องเจอทั้งคู่ในประโยคที่ถูก Noise แล้วเท่านั้น
                 if head_text in text and tail_text in text:
+                    # 🔥 ZERO-SHOT: Canonicalize Label (Consolidate Labels)
+                    final_rel_type = canonicalize_relation_label(rel_type)
+                    
+                    # 🔥 Capture Canonical Label for Description
+                    canonical_rel_for_desc = final_rel_type
+
+                    # 🔥 V3: Label Synonym Augmentation for Relations - 50% โอกาสใช้ synonym
+                    final_rel_type = get_label_synonym(final_rel_type, label_type="relation", probability=0.5)
+                    
+                    # รับ Description
+                    rel_description = get_label_description(canonical_rel_for_desc, label_type="relation")
+
                     relations.append({
                         "head": head_text,
                         "tail": tail_text,
-                        "label": rel_type
+                        "label": final_rel_type,
+                        "description": rel_description
                     })
 
     # ============================================================
@@ -2269,18 +4457,18 @@ def generate_sample(templates: List, entities_dict: Dict) -> Dict:
     return {"text": text, "entities": entities, "relations": relations}
 
 
-def generate_samples(templates: List, entities_dict: Dict, count: int) -> List[Dict]:
-    """Generate multiple samples."""
+def generate_samples(templates: List, entities_dict: Dict, count: int, use_style_variation: bool = True) -> List[Dict]:
+    """Generate multiple samples with optional style variation."""
     samples = []
     for _ in range(count):
-        sample = generate_sample(templates, entities_dict)
+        sample = generate_sample(templates, entities_dict, use_style_variation=use_style_variation)
         if sample["entities"] and sample["relations"]:  # Only add valid samples
             samples.append(sample)
     return samples
 
 
 def generate_dataset(target_count: int = 10000) -> List[Dict]:
-    """Generate a balanced multilingual dataset."""
+    """Generate a balanced multilingual dataset with Zero-Shot Generalization focus."""
     
     # Distribution: 30% EN, 25% ZH, 20% JA, 15% KO, 10% TH
     en_count = int(target_count * 0.30)
@@ -2313,8 +4501,28 @@ def generate_dataset(target_count: int = 10000) -> List[Dict]:
     print(f"Generating {th_count//10} Thai complex samples...")
     th_samples += generate_samples(TH_COMPLEX_TEMPLATES, TH_ENTITIES, th_count // 10)
     
+    # 🔥 ZERO-SHOT: Add Generic Label Templates (15% of EN count)
+    generic_count = int(en_count * 0.15)
+    print(f"🔥 Generating {generic_count} Generic Label samples for Zero-Shot...")
+    generic_samples = generate_samples(GENERIC_ENTITY_TEMPLATES, EN_ENTITIES, generic_count)
+    
+    # 🔥 ZERO-SHOT: Add CoNLL04-style Templates (10% of EN count)  
+    conll_count = int(en_count * 0.10)
+    print(f"🔥 Generating {conll_count} CoNLL04-style samples for Zero-Shot...")
+    conll_samples = generate_samples(CONLL04_STYLE_TEMPLATES, EN_ENTITIES, conll_count)
+    
+    # 🔥 LINGUISTIC PARAPHRASING: Passive Voice, Appositive, Relative Clause (20% of EN count)
+    paraphrase_count = int(en_count * 0.20)
+    print(f"🔥 Generating {paraphrase_count} Linguistic Paraphrase samples (Passive/Appositive/Relative)...")
+    paraphrase_samples = generate_samples(LINGUISTIC_PARAPHRASE_TEMPLATES, EN_ENTITIES, paraphrase_count)
+    
+    # 🔥 V3: CROSS-RE STYLE Templates for Zero-Shot Generalization (15% of EN count)
+    cross_re_count = int(en_count * 0.15)
+    print(f"🔥 Generating {cross_re_count} Cross-RE-style samples (politicalparty, band, musicalartist, etc.)...")
+    cross_re_samples = generate_samples(CROSS_RE_STYLE_TEMPLATES, EN_ENTITIES, cross_re_count)
+    
     # Combine and shuffle
-    all_samples = en_samples + zh_samples + ja_samples + ko_samples + th_samples 
+    all_samples = en_samples + zh_samples + ja_samples + ko_samples + th_samples + generic_samples + conll_samples + paraphrase_samples + cross_re_samples
     random.shuffle(all_samples)
     
     return all_samples
@@ -2370,6 +4578,31 @@ def print_type_summary():
     print("=" * 60)
     for i, (rtype, (head, tail, desc)) in enumerate(RELATION_TYPES.items(), 1):
         print(f"  {i:3d}. {rtype}: {head} -> {tail} ({desc})")
+    
+    print("\n" + "=" * 60)
+    print("CROSS-LABEL MAPPING (Hierarchical)")
+    print("=" * 60)
+    for parent, children in LABEL_HIERARCHY.items():
+        print(f"  {parent} → {children}")
+    
+    print("\n" + "=" * 60)
+    print("🔥 RELATION ALIASES (Zero-Shot)")
+    print("=" * 60)
+    for canonical, aliases in RELATION_ALIASES.items():
+        print(f"  {canonical} = {aliases}")
+    
+    print("\n" + "=" * 60)
+    print("🔥 ZERO-SHOT TEMPLATES")
+    print("=" * 60)
+    print(f"  GENERIC_ENTITY_TEMPLATES: {len(GENERIC_ENTITY_TEMPLATES)} templates")
+    print(f"  CONLL04_STYLE_TEMPLATES: {len(CONLL04_STYLE_TEMPLATES)} templates")
+    print(f"  LINGUISTIC_PARAPHRASE_TEMPLATES: {len(LINGUISTIC_PARAPHRASE_TEMPLATES)} templates (Passive/Appositive/Relative)")
+    
+    print("\n" + "=" * 60)
+    print("SENTENCE STYLES")
+    print("=" * 60)
+    for style in SENTENCE_STYLES.keys():
+        print(f"  - {style}")
 
 
 if __name__ == "__main__":
@@ -2380,17 +4613,35 @@ if __name__ == "__main__":
     
     random.seed(42)
     
-    print(f"NERRE Dataset Generator v2")
+    print(f"NERRE Dataset Generator v2 - 🔥 ZERO-SHOT READY")
     print(f"Entity Types: {len(ENTITY_TYPES)}")
     print(f"Relation Types: {len(RELATION_TYPES)}")
-    print(f"Generating 100000 multilingual samples...")
-    
-    samples = generate_dataset(100000)
-    
-    print_statistics(samples)
-    
-    output_path = f"/data/tcustpg18/NERRE/NERRE/dataset/multilingual_data_v7_100000.json"
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(samples, f, ensure_ascii=False, indent=2)
-    
-    print(f"\nDataset saved to: {output_path}")
+    print(f"Cross-Label Mappings: {len(LABEL_HIERARCHY)}")
+    print(f"Relation Aliases: {len(RELATION_ALIASES)}")
+    print(f"Generic Templates: {len(GENERIC_ENTITY_TEMPLATES)} + {len(CONLL04_STYLE_TEMPLATES)}")
+    print(f"Linguistic Paraphrase: {len(LINGUISTIC_PARAPHRASE_TEMPLATES)} (Passive/Appositive/Relative)")
+    print(f"Sentence Styles: {list(SENTENCE_STYLES.keys())}")
+    print(f"Generating Train/Val/Test Datasets...")
+
+    # Configuration
+    SPLITS = {
+        "train": 80000,
+        "val": 10000,
+        "test": 10000
+    }
+    BASE_PATH = "/data/tcustpg18/NERRE/NERRE/dataset"
+    VERSION = "v8"
+
+    for split_name, count in SPLITS.items():
+        print("\n" + "=" * 60)
+        print(f"Generating {split_name.upper()} Set ({count} samples)...")
+        print("=" * 60)
+        
+        samples = generate_dataset(count)
+        print_statistics(samples)
+        
+        output_path = f"{BASE_PATH}/multilingual_data_{VERSION}_{split_name}.json"
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(samples, f, ensure_ascii=False, indent=2)
+        
+        print(f"✅ Saved {split_name} dataset to: {output_path}")

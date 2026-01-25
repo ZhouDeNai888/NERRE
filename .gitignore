@@ -84,9 +84,21 @@ tmp/
 
 
 # User specific ignores
-saved_model_v11/
-saved_model_v13/
-saved_model_v15/
-saved_model_v16/
+saved_model_v21_best/
+saved_model_v23/
+saved_model_v24/
+saved_model_v25/
 
 huggingface_release/
+
+dataset/multilingual_data_v7_test.json
+dataset/multilingual_data_v7_train.json
+dataset/multilingual_data_v7_val.json
+
+
+dataset/multilingual_data_v8_test.json
+dataset/multilingual_data_v8_train.json
+dataset/multilingual_data_v8_val.json
+
+
+

@@ -20,18 +20,28 @@ class GraphRAGDataset(Dataset):
     
     # Special label for non-entity spans
     O_LABEL = "O"
+    NO_REL_LABEL = "NO_RELATION"
     
     def __init__(self, json_file, tokenizer, max_len=256, neg_sample_ratio=0.3, neg_span_ratio=1.0):
         """
         Args:
-            json_file: path to training data JSON
+            json_file: path to training data JSON (str or List[str])
             tokenizer: HuggingFace tokenizer
             max_len: max sequence length
             neg_sample_ratio: ratio of negative labels to sample
             neg_span_ratio: ratio of negative spans (non-entity) to positive spans
         """
-        with open(json_file, 'r', encoding='utf-8') as f:
-            self.data = json.load(f)
+        self.data = []
+        if isinstance(json_file, str):
+            json_files = [json_file]
+        else:
+            json_files = json_file
+            
+        for jf in json_files:
+            print(f"Loading data from {jf}...")
+            with open(jf, 'r', encoding='utf-8') as f:
+                data_part = json.load(f)
+                self.data.extend(data_part)
             
         self.tokenizer = tokenizer
         self.max_len = max_len
@@ -42,26 +52,71 @@ class GraphRAGDataset(Dataset):
         self.all_ent_labels = set()
         self.all_rel_labels = set()
         
+        # Store descriptions
+        self.ent_descriptions = {}
+        self.rel_descriptions = {}
+
         print(f"Scanning {json_file} for labels...")
         for item in self.data:
             if 'entities' in item:
                 for ent in item['entities']:
-                    self.all_ent_labels.add(ent['label'])
+                    label = ent['label']
+                    self.all_ent_labels.add(label)
+                    # Capture description if available
+                    if 'description' in ent and label not in self.ent_descriptions:
+                        self.ent_descriptions[label] = ent['description']
+
             if 'relations' in item:
                 for rel in item['relations']:
-                    self.all_rel_labels.add(rel['label'])
+                    label = rel['label']
+                    self.all_rel_labels.add(label)
+                    # Capture description if available
+                    if 'description' in rel and label not in self.rel_descriptions:
+                        self.rel_descriptions[label] = rel['description']
         
         self.all_ent_labels = sorted(list(self.all_ent_labels))
         self.all_rel_labels = sorted(list(self.all_rel_labels))
         
         # ✅ เพิ่ม "O" label ไว้ตัวแรก (index 0)
         self.all_ent_labels_with_O = [self.O_LABEL] + self.all_ent_labels
+        
+        # 🔥 [NEW] เพิ่ม "NO_RELATION" label ไว้ตัวแรก (index 0)
+        self.all_rel_labels_with_NO_REL = [self.NO_REL_LABEL] + self.all_rel_labels
 
         self.ent_label2id = {label: i for i, label in enumerate(self.all_ent_labels_with_O)}
+        self.rel_label2id = {label: i for i, label in enumerate(self.all_rel_labels_with_NO_REL)}
+
+        # Create Descriptive Label List for Model Input
+        self.ent_label_texts = []
+        for label in self.all_ent_labels_with_O:
+            if label == self.O_LABEL:
+                desc = "Outside: Not an entity"
+            else:
+                desc = self.ent_descriptions.get(label, f"{label}: Representation of {label}")
+                # Ensure format "Label: Description" if not already
+                if not desc.startswith(label):
+                    desc = f"{label}: {desc}"
+            self.ent_label_texts.append(desc)
+
+        self.rel_label_texts = []
+        for label in self.all_rel_labels_with_NO_REL:
+            if label == self.NO_REL_LABEL:
+                desc = "No Relation: No relationship exists between these entities"
+            else:
+                desc = self.rel_descriptions.get(label, f"{label}: Relation type {label}")
+                if not desc.startswith(label):
+                    desc = f"{label}: {desc}"
+            self.rel_label_texts.append(desc)
         
-        print(f"✅ Found {len(self.all_ent_labels)} entity types: {self.all_ent_labels}")
-        print(f"✅ Added 'O' label for non-entity spans")
-        print(f"✅ Found {len(self.all_rel_labels)} relation types: {self.all_rel_labels}")
+        print(f"✅ Found {len(self.all_ent_labels)} entity types")
+        print(f"✅ Found {len(self.all_rel_labels)} relation types")
+        print(f"✅ Added special labels: '{self.O_LABEL}' and '{self.NO_REL_LABEL}'")
+
+    def get_ent_label_list(self):
+        return self.all_ent_labels_with_O
+
+    def get_rel_label_list(self):
+        return self.all_rel_labels_with_NO_REL
 
     def __len__(self):
         return len(self.data)
@@ -179,7 +234,32 @@ class GraphRAGDataset(Dataset):
             return negative_spans
             
         return []
-        
+    
+
+    def _generate_border_negatives(self, valid_entities, num_to_sample, seq_len):
+        """
+        จงใจสร้าง Span ที่ 'เกือบถูก' เพื่อคุมขอบเขต (Boundary Control)
+        """
+        border_candidates = []
+        for ent in valid_entities:
+            s, e = ent['span']
+            
+            # ตัวหลอก 1: ขยายขวาไปอีก 1 token (เช่น "Elon Musk" -> "Elon Musk founded")
+            if e + 1 < seq_len:
+                border_candidates.append((s, e + 1))
+            
+            # ตัวหลอก 2: ขยายซ้ายไปอีก 1 token (เช่น "SpaceX" -> "founded SpaceX")
+            if s - 1 >= 0:
+                border_candidates.append((max(0, s - 1), e))
+                
+            # ตัวหลอก 3: ตัดท้ายออก 1 token (เช่น "Elon Musk" -> "Elon")
+            if e > s:
+                border_candidates.append((s, e - 1))
+
+        if not border_candidates:
+            return []
+            
+        return random.sample(border_candidates, k=min(len(border_candidates), num_to_sample))
 
     def __getitem__(self, idx):
         item = self.data[idx]
@@ -223,6 +303,10 @@ class GraphRAGDataset(Dataset):
         negative_spans = self._generate_negative_spans(
             words, valid_entities, num_neg_spans
         )
+
+
+        # 🔥 [NEW] เพิ่ม Border Negatives ตรงนี้
+        border_negatives = self._generate_border_negatives(valid_entities, len(valid_entities), self.max_len)
         
         # 4. Combine positive and negative spans
         # Positive spans (real entities)
@@ -237,9 +321,17 @@ class GraphRAGDataset(Dataset):
         for neg_span in negative_spans:
             all_spans.append(neg_span)
             all_span_labels.append(self.O_LABEL)  # "O" for Outside
+
+
+        # 🔥 [NEW] ใส่ Border Negatives เข้าไปในชุดข้อมูล
+        valid_span_set = set([ent['span'] for ent in valid_entities])
+        for b_neg in border_negatives:
+            if b_neg not in valid_span_set: # ตรวจสอบเพื่อไม่ให้ทับของจริง
+                all_spans.append(b_neg)
+                all_span_labels.append(self.O_LABEL)
         
         # ✅ 5. Use ALL labels including "O" - always use the full label set
-        train_ent_labels = self.all_ent_labels_with_O  # ["O", "algorithm", "date", ...]
+        train_ent_labels = self.ent_label_texts  # Use descriptions
         
         # 6. Create entity target matrix
         num_spans = len(all_spans)
@@ -291,12 +383,17 @@ class GraphRAGDataset(Dataset):
             head_indices = []
             tail_indices = []
 
-            # 🔥 Priority 1: เช็คว่า JSON มี 'head_idx' / 'tail_idx' หรือไม่ (แม่นยำที่สุด)
+            # 🔥 Priority 1: เช็คว่า JSON มี 'head_idx' / 'tail_idx' หรือไม่ (แม่นยำที่สุด - รองรับ CrossRE ver เก่า)
             if 'head_idx' in rel and 'tail_idx' in rel:
                 head_indices = id_to_valid_indices.get(rel['head_idx'], [])
                 tail_indices = id_to_valid_indices.get(rel['tail_idx'], [])
 
-            # ⚠️ Priority 2: ถ้าไม่มี ID ให้ใช้ชื่อ (Text) เหมือนเดิม
+            # 🔥 Priority 2: เช็คว่า 'head' / 'tail' เป็น Integer Index หรือไม่ (รองรับ hf_dataloader format)
+            elif 'head' in rel and 'tail' in rel and isinstance(rel['head'], int) and isinstance(rel['tail'], int):
+                head_indices = id_to_valid_indices.get(rel['head'], [])
+                tail_indices = id_to_valid_indices.get(rel['tail'], [])
+
+            # ⚠️ Priority 3: ถ้าไม่มี ID ให้ใช้ชื่อ (Text) เหมือนเดิม (รองรับ Data v2 เดิม)
             elif 'head' in rel and 'tail' in rel:
                 head_indices = text_to_valid_indices.get(rel['head'], [])
                 tail_indices = text_to_valid_indices.get(rel['tail'], [])
@@ -306,9 +403,11 @@ class GraphRAGDataset(Dataset):
                 continue
 
             # เตรียม Target (One-hot vector)
-            rel_target = torch.zeros(len(self.all_rel_labels))
-            if rel['label'] in self.all_rel_labels:
-                rel_idx = self.all_rel_labels.index(rel['label']) # หรือใช้ self.label2id ถ้าทำแล้ว
+            # ใช้ self.all_rel_labels_with_NO_REL (ที่มี NO_RELATION ที่ index 0)
+            rel_target = torch.zeros(len(self.all_rel_labels_with_NO_REL))
+            
+            if rel['label'] in self.rel_label2id:
+                rel_idx = self.rel_label2id[rel['label']]
                 rel_target[rel_idx] = 1.0
             
             # จับคู่ทุกความเป็นไปได้ (Pairing)
@@ -353,21 +452,38 @@ class GraphRAGDataset(Dataset):
                     if pair not in positive_rel_map:
                         neg_candidates.append(pair)
         
-        # 3. 🔥 สุ่มเลือก Negative มาแค่บางส่วน (Sampling)
-        # กฎ: เอา Negative แค่ 3 เท่าของ Positive ก็พอ (Ratio 1:3)
-        # ถ้าไม่มี Positive เลย ให้สุ่มมาสัก 2-3 ตัว เพื่อสอนว่า "หน้านี้ไม่มีอะไรนะ"
-        
+        # 3. 🔥 Hard Negative Strategy: Reversals + Random
+        # กฎ: เอา Negative แค่ 3 เท่าของ Positive (Ratio 1:3)
         if num_positives > 0:
-            num_neg_to_sample = min(len(neg_candidates), num_positives * 3) # ✅ Ratio 1:3
+            num_neg_to_sample = num_positives * 9
         else:
-            num_neg_to_sample = min(len(neg_candidates), 5) # ถ้าไม่มี Positive เลย เอามาสอนนิดหน่อย
+            num_neg_to_sample = 15
+
+        # 3.1 Force Reversed Pairs (สอนให้รู้ว่า A->B ไม่เท่ากับ B->A)
+        forced_negatives = set()
+        for (h, t) in pos_keys:
+             rev_pair = (t, h)
+             if rev_pair not in positive_rel_map:
+                 forced_negatives.add(rev_pair)
+
+        # 3.2 Fill the rest with Random Negatives
+        neg_candidates = [p for p in neg_candidates if p not in forced_negatives] # ลบตัวซ้ำ
+        
+        final_negs = list(forced_negatives)
+        
+        # ถ้าโควตายังเหลือ ให้สุ่มเพิ่ม
+        remaining_slots = num_neg_to_sample - len(final_negs)
+        if remaining_slots > 0 and neg_candidates:
+             final_negs += random.sample(neg_candidates, min(len(neg_candidates), remaining_slots))
+        
+        # ถ้า Hard Negatives เยอะเกินโควตา ก็ให้ใช้ทั้งหมดไปเลย (ยิ่งเยอะยิ่งดีสำหรับ Direction)
+        
+        if final_negs:
+             # 🔥 [NET] Negative Target คือ class "NO_RELATION" (index 0)
+            zero_target = torch.zeros(len(self.all_rel_labels_with_NO_REL))
+            zero_target[0] = 1.0 # Set NO_RELATION to 1.0
             
-        if neg_candidates:
-            # ใช้ random.sample เพื่อกระจายความเสี่ยง
-            selected_negs = random.sample(neg_candidates, num_neg_to_sample)
-            
-            zero_target = torch.zeros(len(self.all_rel_labels))
-            for pair in selected_negs:
+            for pair in final_negs:
                 all_pairs.append(pair)
                 all_targets.append(zero_target)
 
@@ -375,7 +491,7 @@ class GraphRAGDataset(Dataset):
         if all_targets:
             rel_targets = torch.stack(all_targets)
         else:
-            rel_targets = torch.zeros((0, len(self.all_rel_labels)))
+            rel_targets = torch.zeros((0, len(self.all_rel_labels_with_NO_REL)))
         
         return {
             "input_ids": input_ids,
@@ -384,7 +500,7 @@ class GraphRAGDataset(Dataset):
             "ent_labels": train_ent_labels,
             "ent_targets": ent_targets,
             "rel_pairs": all_pairs,      # ✅ ส่งไปทั้งคู่จริงและคู่หลอก
-            "rel_labels": self.all_rel_labels,
+            "rel_labels": self.rel_label_texts, # Use descriptions
             "rel_targets": rel_targets,  # ✅ Target มีทั้ง 1 และ 0
             "num_positive_spans": len(valid_entities)
         }

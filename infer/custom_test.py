@@ -11,7 +11,7 @@ sys.path.append(parent_dir)
 from model.model import ZeroShotJointModel 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model_path = "saved_model_v16"
+model_path = "saved_model_v24"
 
 # Load Model & Tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -19,7 +19,7 @@ with open(f"{model_path}/config.json", "r", encoding="utf-8") as f:
     config = json.load(f)
 
 model = ZeroShotJointModel(config["model_name"]).to(device)
-model.load_state_dict(torch.load(f"{model_path}/best_model.bin", map_location=device))
+model.load_state_dict(torch.load(f"{model_path}/pytorch_model.bin", map_location=device))
 model.eval()
 
 def zero_shot_test(text: str, custom_ents: List[str], custom_rels: List[str], debug: bool = True):
@@ -61,7 +61,9 @@ def zero_shot_test(text: str, custom_ents: List[str], custom_rels: List[str], de
         
         # ดึงค่า Temperature (ถ้าเทรนมาดี ค่านี้จะช่วยบีบ Probability)
         tau = model.temperature.item()
-        e_probs = torch.sigmoid(e_logits / tau)
+        # tau = 0.05  # กำหนดค่า Temperature คงที่สำหรับการทดสอบนี้
+        # e_probs = torch.sigmoid(e_logits / tau)
+        e_probs = torch.softmax(e_logits / tau, dim=-1)
         # --- [DEBUG SECTION] ---
         if debug:
             print(f"\n🔍 [DEBUG SCAN] Top Span Candidates (Sorted by Entity Confidence):")

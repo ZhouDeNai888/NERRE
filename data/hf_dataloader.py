@@ -34,7 +34,7 @@ def process_cross_re(dataset_name="DFKI-SLT/cross_re", split="train"):
     
     # กำหนด Domain ที่ต้องการโหลด (ตามที่คุณแปะมามี ai, literature, music ฯลฯ)
     # เราจะวนลูปโหลดทีละโดเมนเลยครับ จะได้ข้อมูลเยอะๆ
-    domains = ["ai", "literature", "music", "politics", "science"]
+    domains = ["ai", "literature", "music", "news", "politics", "science"]
     all_formatted_data = []
 
     for domain in domains:
@@ -63,14 +63,22 @@ def process_cross_re(dataset_name="DFKI-SLT/cross_re", split="train"):
                 end_token_idx = ent_data['id-end']
                 label = ent_data['entity-type']
                 
+                # Check bounds to avoid errors
+                if start_token_idx >= len(token_map) or end_token_idx >= len(token_map):
+                    continue
+
                 # แปลง Token Index -> Char Offset
                 start_char = token_map[start_token_idx][0]
                 end_char = token_map[end_token_idx][1]
+                
+                # Extract entity text
+                entity_text = text[start_char:end_char]
                 
                 entities.append({
                     "start": start_char,
                     "end": end_char,
                     "label": label,
+                    "text": entity_text,  # ✅ Added text field
                     # เก็บ token span ไว้เทียบกับ relation (เดี๋ยวลบทิ้งตอนจบ)
                     "_token_span": (start_token_idx, end_token_idx) 
                 })
@@ -176,14 +184,243 @@ def process_few_rel(dataset_name="thunlp/few_rel", split="train_wiki"):
         
     return formatted_data
 
-def process_tacred(dataset_name="tacred", split="train"):
-    """
-    TACRED มักจะต้องโหลดผ่าน LDC หรือเวอร์ชันชุมชน
-    ถ้าใช้ 'DFKI-SLT/tacred' ไม่ได้ อาจต้องใช้ 'knowledgator/tacred' หรือไฟล์ json local
-    ฟังก์ชันนี้เขียนเผื่อไว้สำหรับ Structure ทั่วไป
-    """
-    # ... (Logic คล้าย FewRel โดยดู field subj_start, obj_start) ...
-    return []
+def process_tacred(dataset_name="DFKI-SLT/tacred", split="train"):
+    print(f"Loading {dataset_name} ({split})...")
+    try:
+        # Note: TACRED is usually licensed. If this fails, user might need to login or use local files.
+        ds = load_dataset(dataset_name, split=split)
+    except Exception as e:
+        print(f"❌ Error loading {dataset_name}: {e}")
+        return []
+
+    processed_data = []
+    
+    for item in tqdm(ds, desc="Processing TACRED"):
+        # 1. Get Tokens
+        tokens = item.get('tokens') or item.get('sentence')
+        if not tokens: continue
+        
+        text, token_map = reconstruct_text_from_tokens(tokens)
+        
+        # 2. Extract Entities & Relations
+        # Check standard TACRED format (subj/obj indices) vs DFKI format (ner/relations lists)
+        
+        entities = []
+        relations = []
+        
+        # --- Case A: DFKI Unified Format (like CrossRE) ---
+        if 'ner' in item and 'relations' in item:
+            # Re-use logic similar to CrossRE/Conll04
+            raw_ner = item['ner']
+            
+            for ent in raw_ner:
+                s_idx = ent.get('id-start', ent.get('start'))
+                e_idx = ent.get('id-end', ent.get('end'))
+                label = ent.get('entity-type', ent.get('type'))
+                
+                if s_idx is None or e_idx is None: continue
+                if s_idx >= len(token_map) or e_idx >= len(token_map): continue
+                
+                start_char = token_map[s_idx][0]
+                end_char = token_map[e_idx][1]
+                entity_text = text[start_char:end_char]
+                
+                entities.append({
+                    "start": start_char,
+                    "end": end_char,
+                    "label": label,
+                    "text": entity_text,
+                    "_token_span": (s_idx, e_idx)
+                })
+
+            raw_rels = item['relations']
+            for rel in raw_rels:
+                # Find indices matching spans
+                # DFKI relations usually point to token spans
+                if 'id_1-start' in rel:
+                    span1 = (rel['id_1-start'], rel['id_1-end'])
+                    span2 = (rel['id_2-start'], rel['id_2-end'])
+                elif 'head' in rel and isinstance(rel['head'], list): # Check if head is [start, end]
+                    # This case depends on format
+                    pass 
+                
+                head_idx = -1
+                tail_idx = -1
+                
+                for i, e in enumerate(entities):
+                    if e.get('_token_span') == span1: head_idx = i
+                    if e.get('_token_span') == span2: tail_idx = i
+                    
+                if head_idx != -1 and tail_idx != -1:
+                    relations.append({
+                        "head": head_idx,
+                        "tail": tail_idx,
+                        "label": rel['relation-type']
+                    })
+
+        # --- Case B: Standard TACRED Format (subj_start, obj_start...) ---
+        elif 'subj_start' in item and 'obj_start' in item:
+            # TACRED has 1 relation per sample, between SUBJ and OBJ
+            
+            # Subj
+            s_start, s_end = item['subj_start'], item['subj_end']
+            s_type = item['subj_type']
+            
+            # Obj
+            o_start, o_end = item['obj_start'], item['obj_end']
+            o_type = item['obj_type']
+            
+            rel_label = item['relation']
+            
+            # Helper to add entity if not exists (or just add both)
+            # In TACRED, we focus on these two. Other entities might be in 'ner' list if available?
+            # Standard TACRED has 'ner' field which is list of tags matching tokens length
+            
+            # Let's extract ALL entities from 'stanford_ner' / 'ner' tags if present, otherwise just subj/obj
+            
+            # Using Subj/Obj is safest for relation extraction
+            # 1. Subj
+            subj_char_start = token_map[s_start][0]
+            subj_char_end = token_map[s_end][1]
+            subj_text = text[subj_char_start:subj_char_end]
+            
+            entities.append({
+                "start": subj_char_start,
+                "end": subj_char_end,
+                "label": s_type,
+                "text": subj_text
+            })
+            head_idx = 0
+            
+            # 2. Obj
+            obj_char_start = token_map[o_start][0]
+            obj_char_end = token_map[o_end][1]
+            obj_text = text[obj_char_start:obj_char_end]
+            
+            entities.append({
+                "start": obj_char_start,
+                "end": obj_char_end,
+                "label": o_type,
+                "text": obj_text
+            })
+            tail_idx = 1
+            
+            # Add relation (if not 'no_relation', but we keep it and let dataset class handle negative ratio)
+            # Or filtering 'no_relation' depends on user preference. GraphRAGDataset uses "NO_RELATION"
+            
+            relations.append({
+                "head": head_idx,
+                "tail": tail_idx,
+                "label": rel_label
+            })
+            
+        # Cleanup
+        for e in entities:
+            if '_token_span' in e: del e['_token_span']
+            
+        processed_data.append({
+            "text": text,
+            "entities": entities,
+            "relations": relations
+        })
+
+    return processed_data
+
+def process_conll04(dataset_name="DFKI-SLT/conll04", split="train"):
+    print(f"Loading {dataset_name} ({split})...")
+    try:
+        ds = load_dataset(dataset_name, split=split)
+    except Exception as e:
+        print(f"❌ Error loading {dataset_name}: {e}")
+        return []
+
+    processed_data = []
+    for item in tqdm(ds, desc="Processing Conll04"):
+        # Adapt keys if needed. Assuming DFKI structure.
+        tokens = item.get('tokens') or item.get('sentence')
+        if not tokens: continue
+        
+        text, token_map = reconstruct_text_from_tokens(tokens)
+        
+        # NER
+        entities = []
+        ner_list = item.get('entities') or item.get('ner') or []
+        for ent in ner_list:
+            # Check keys
+            if 'id-start' in ent: # DFKI style (Inclusive)
+                s_idx = ent['id-start']
+                e_idx = ent['id-end']
+                label = ent['entity-type']
+                
+                if s_idx >= len(token_map) or e_idx >= len(token_map): continue
+                start_char = token_map[s_idx][0]
+                end_char = token_map[e_idx][1]
+                
+            elif 'start' in ent: # Generic/Standard (Exclusive End)
+                s_idx = ent['start']
+                e_idx = ent['end'] 
+                label = ent['type']
+                
+                # CoNLL04 is Exclusive End for 'end' field
+                if s_idx >= len(token_map): continue
+                if e_idx > len(token_map): continue # e_idx can be equal to len
+                
+                start_char = token_map[s_idx][0]
+                if e_idx > 0:
+                     end_char = token_map[e_idx - 1][1]
+                else:
+                     continue
+            else:
+                continue
+                
+            entities.append({
+                "start": start_char,
+                "end": end_char,
+                "label": label,
+                "text": text[start_char:end_char], # Keep aligned text
+                "_token_span": (s_idx, e_idx) # Save original for rel matching
+            })
+            
+        # Relations
+        relations = []
+        rel_list = item.get('relations') or []
+        for rel in rel_list:
+             label = rel.get('relation-type') or rel.get('type')
+             
+             head_idx = -1
+             tail_idx = -1
+             
+             if 'id_1-start' in rel: # DFKI
+                 h_span = (rel['id_1-start'], rel['id_1-end'])
+                 t_span = (rel['id_2-start'], rel['id_2-end'])
+                 
+                 for i, e in enumerate(entities):
+                     if e.get('_token_span') == h_span: head_idx = i
+                     if e.get('_token_span') == t_span: tail_idx = i
+             elif 'head' in rel:
+                 # Check if int index
+                 if isinstance(rel['head'], int):
+                     head_idx = rel['head']
+                     tail_idx = rel['tail']
+            
+             if head_idx != -1 and tail_idx != -1:
+                 relations.append({
+                     "head": head_idx,
+                     "tail": tail_idx,
+                     "label": label
+                 })
+        
+        # Clean entities
+        for e in entities:
+            if '_token_span' in e: del e['_token_span']
+            
+        processed_data.append({
+            "text": text,
+            "entities": entities,
+            "relations": relations
+        })
+        
+    return processed_data
 
 def generate_merged_dataset(output_file="train_data.json"):
     all_data = []
@@ -205,5 +442,62 @@ def generate_merged_dataset(output_file="train_data.json"):
     print(f"✅ Saved merged dataset to {output_file}")
 
 if __name__ == "__main__":
-    # รันไฟล์นี้ตรงๆ เพื่อสร้างไฟล์ JSON
-    generate_merged_dataset(output_file="dataset/data_v2.json")
+    # 1. Download CrossRE (DFKI-SLT/cross_re)
+    print("🚀 Processing CrossRE Dataset...")
+    crossre_data_train = process_cross_re("DFKI-SLT/cross_re", split="train")
+    crossre_data_val = process_cross_re("DFKI-SLT/cross_re", split="validation")
+    crossre_data_test = process_cross_re("DFKI-SLT/cross_re", split="test")
+
+
+
+    if crossre_data_train:
+        os.makedirs("dataset", exist_ok=True)
+        with open("dataset/cross_re_train.json", "w", encoding="utf-8") as f:
+            json.dump(crossre_data_train, f, ensure_ascii=False, indent=2)
+        print(f"✅ Saved {len(crossre_data_train)} samples to dataset/cross_re_train.json")
+
+    if crossre_data_val:
+        with open("dataset/cross_re_validation.json", "w", encoding="utf-8") as f:
+            json.dump(crossre_data_val, f, ensure_ascii=False, indent=2)
+        print(f"✅ Saved {len(crossre_data_val)} samples to dataset/cross_re_validation.json")
+
+    if crossre_data_test:
+        with open("dataset/cross_re_test.json", "w", encoding="utf-8") as f:
+            json.dump(crossre_data_test, f, ensure_ascii=False, indent=2)
+        print(f"✅ Saved {len(crossre_data_test)} samples to dataset/cross_re_test.json")
+
+
+    print("\n🚀 Processing conll04 Dataset...")
+
+    # 2. Download CoNLL04 (optional)
+    conll_data_train = process_conll04("DFKI-SLT/conll04", split="train")
+    # 3. Download TACRED (DFKI-SLT/tacred)
+    print("🚀 Processing TACRED Dataset...")
+    tacred_data = process_tacred("DFKI-SLT/tacred", split="train")
+    if tacred_data:
+        # Save
+        with open("dataset/tacred_train.json", "w", encoding="utf-8") as f:
+            json.dump(tacred_data, f, ensure_ascii=False, indent=2)
+        print(f"✅ Saved {len(tacred_data)} samples to dataset/tacred_train.json")   
+    conll_data_test = process_conll04("DFKI-SLT/conll04", split="test")
+    conll_data_val = process_conll04("DFKI-SLT/conll04", split="validation")
+    
+    # Save separately or merge? The user just said "download".
+    # Saving to 'dataset/conll04_train.json' and 'dataset/conll04_test.json'
+    
+    if conll_data_train:
+        with open("dataset/conll04_train.json", "w", encoding="utf-8") as f:
+            json.dump(conll_data_train, f, ensure_ascii=False, indent=2)
+        print(f"✅ Saved {len(conll_data_train)} samples to dataset/conll04_train.json")
+        
+    if conll_data_test:
+        with open("dataset/conll04_test.json", "w", encoding="utf-8") as f:
+            json.dump(conll_data_test, f, ensure_ascii=False, indent=2)
+        print(f"✅ Saved {len(conll_data_test)} samples to dataset/conll04_test.json")
+
+    if conll_data_val:
+        with open("dataset/conll04_validation.json", "w", encoding="utf-8") as f:
+            json.dump(conll_data_val, f, ensure_ascii=False, indent=2)
+        print(f"✅ Saved {len(conll_data_val)} samples to dataset/conll04_validation.json")
+
+    # generate_merged_dataset(output_file="dataset/data_v2.json")

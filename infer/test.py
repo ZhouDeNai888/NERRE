@@ -73,7 +73,7 @@ class NERREPredictor:
         
         # 🔥 จุดเปลี่ยนสำคัญ: ใช้ Temperature Scaling เพื่อถ่างคะแนน
         # ลองปรับจาก 0.07 ไปจนถึง 0.01 ถ้าคะแนนยังเกาะกลุ่ม
-        tau = 0.03 
+        tau = self.model.temperature.item()
         probs = torch.softmax(logits / tau, dim=-1)
         
         max_probs, pred_ids = torch.max(probs, dim=-1)
@@ -115,7 +115,7 @@ class NERREPredictor:
 
 # --- การใช้งาน ---
 if __name__ == "__main__":
-    MODEL_DIR = "saved_model_v16"  # ระบุโฟลเดอร์ของคุณ
+    MODEL_DIR = "saved_model_v23"  # ระบุโฟลเดอร์ของคุณ
     predictor = NERREPredictor(MODEL_DIR)
     
     raw_text = "Elon Musk founded SpaceX in 2002. He is a famous engineer from USA."
