@@ -52,27 +52,14 @@ class GraphRAGDataset(Dataset):
         self.all_ent_labels = set()
         self.all_rel_labels = set()
         
-        # Store descriptions
-        self.ent_descriptions = {}
-        self.rel_descriptions = {}
-
         print(f"Scanning {json_file} for labels...")
         for item in self.data:
             if 'entities' in item:
                 for ent in item['entities']:
-                    label = ent['label']
-                    self.all_ent_labels.add(label)
-                    # Capture description if available
-                    if 'description' in ent and label not in self.ent_descriptions:
-                        self.ent_descriptions[label] = ent['description']
-
+                    self.all_ent_labels.add(ent['label'])
             if 'relations' in item:
                 for rel in item['relations']:
-                    label = rel['label']
-                    self.all_rel_labels.add(label)
-                    # Capture description if available
-                    if 'description' in rel and label not in self.rel_descriptions:
-                        self.rel_descriptions[label] = rel['description']
+                    self.all_rel_labels.add(rel['label'])
         
         self.all_ent_labels = sorted(list(self.all_ent_labels))
         self.all_rel_labels = sorted(list(self.all_rel_labels))
@@ -85,28 +72,6 @@ class GraphRAGDataset(Dataset):
 
         self.ent_label2id = {label: i for i, label in enumerate(self.all_ent_labels_with_O)}
         self.rel_label2id = {label: i for i, label in enumerate(self.all_rel_labels_with_NO_REL)}
-
-        # Create Descriptive Label List for Model Input
-        self.ent_label_texts = []
-        for label in self.all_ent_labels_with_O:
-            if label == self.O_LABEL:
-                desc = "Outside: Not an entity"
-            else:
-                desc = self.ent_descriptions.get(label, f"{label}: Representation of {label}")
-                # Ensure format "Label: Description" if not already
-                if not desc.startswith(label):
-                    desc = f"{label}: {desc}"
-            self.ent_label_texts.append(desc)
-
-        self.rel_label_texts = []
-        for label in self.all_rel_labels_with_NO_REL:
-            if label == self.NO_REL_LABEL:
-                desc = "No Relation: No relationship exists between these entities"
-            else:
-                desc = self.rel_descriptions.get(label, f"{label}: Relation type {label}")
-                if not desc.startswith(label):
-                    desc = f"{label}: {desc}"
-            self.rel_label_texts.append(desc)
         
         print(f"✅ Found {len(self.all_ent_labels)} entity types")
         print(f"✅ Found {len(self.all_rel_labels)} relation types")
@@ -331,7 +296,7 @@ class GraphRAGDataset(Dataset):
                 all_span_labels.append(self.O_LABEL)
         
         # ✅ 5. Use ALL labels including "O" - always use the full label set
-        train_ent_labels = self.ent_label_texts  # Use descriptions
+        train_ent_labels = self.all_ent_labels_with_O  # ["O", "algorithm", "date", ...]
         
         # 6. Create entity target matrix
         num_spans = len(all_spans)
@@ -500,7 +465,7 @@ class GraphRAGDataset(Dataset):
             "ent_labels": train_ent_labels,
             "ent_targets": ent_targets,
             "rel_pairs": all_pairs,      # ✅ ส่งไปทั้งคู่จริงและคู่หลอก
-            "rel_labels": self.rel_label_texts, # Use descriptions
+            "rel_labels": self.all_rel_labels_with_NO_REL, # ✅ ส่ง labels ชุดใหม่ที่มี NO_RELATION
             "rel_targets": rel_targets,  # ✅ Target มีทั้ง 1 และ 0
             "num_positive_spans": len(valid_entities)
         }

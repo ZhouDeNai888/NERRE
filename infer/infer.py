@@ -34,13 +34,6 @@ with open(os.path.join(model_path, "config.json"), "r", encoding="utf-8") as f:
 ent_labels = config["ent_labels"] # ต้องมี "O" อยู่ตัวแรก
 rel_labels = config["rel_labels"]
 
-# Check for descriptions (Zero-Shot Support)
-ent_label_texts = config.get("ent_label_descriptions", ent_labels)
-rel_label_texts = config.get("rel_label_descriptions", rel_labels)
-
-if "ent_label_descriptions" in config:
-    print(f"✅ Found descriptions for labels. Using semantic descriptions for inference.")
-
 print(f"✅ Loaded {len(ent_labels)} Entity types and {len(rel_labels)} Relation types.")
 
 # 3. Load Model & Tokenizer
@@ -62,9 +55,8 @@ def predict(text):
         t = tokenizer(labels, return_tensors="pt", padding=True, truncation=True).to(device)
         return t["input_ids"].unsqueeze(0), t["attention_mask"].unsqueeze(0)
 
-    # Use descriptions for encoding if available
-    ent_input, ent_mask = encode_list(ent_label_texts)
-    rel_input, rel_mask = encode_list(rel_label_texts)
+    ent_input, ent_mask = encode_list(ent_labels)
+    rel_input, rel_mask = encode_list(rel_labels)
 
     # 1. Generate Spans (Sliding Window)
     spans = []

@@ -792,22 +792,13 @@ if __name__ == "__main__":
     torch.save(model.state_dict(), f"{config.OUTPUT_DIR}/pytorch_model.bin")
     tokenizer.save_pretrained(config.OUTPUT_DIR)
     
-    # Find base dataset
-    base_ds = train_set
-    while hasattr(base_ds, 'dataset'):
-        base_ds = base_ds.dataset
-
     # Save Config - ✅ ใช้ all_ent_labels_with_O ที่รวม "O" label
-    # Also save descriptions for inference
     with open(f"{config.OUTPUT_DIR}/config.json", "w", encoding='utf-8') as f:
         json.dump({
             "model_name": config.MODEL_NAME,
-            "ent_labels": base_ds.all_ent_labels_with_O,  # ✅ รวม "O"
-            "rel_labels": base_ds.all_rel_labels_with_NO_REL,
-            "ent_label_descriptions": getattr(base_ds, 'ent_label_texts', []),
-            "rel_label_descriptions": getattr(base_ds, 'rel_label_texts', []),
-            "max_len": 256
+            "ent_labels": train_set.dataset.dataset.all_ent_labels_with_O,  # ✅ รวม "O"
+            "rel_labels": sorted(list(train_set.dataset.dataset.all_rel_labels))
         }, f, ensure_ascii=False, indent=4)
         
     print(f"Model saved to {config.OUTPUT_DIR}")
-    print(f"✅ Entity labels (with O): {base_ds.all_ent_labels_with_O}")
+    print(f"✅ Entity labels (with O): {train_set.dataset.dataset.all_ent_labels_with_O}")
